@@ -10,7 +10,7 @@ import {
   Platform,
 } from 'react-native';
 import { getTodoById, insertTodo, updateTodo } from '../services/database';
-import { requestReminderPermissions, scheduleReminders, cancelReminder } from '../services/notifications';
+import { requestReminderPermissions, scheduleReminders, cancelReminder, scheduleTestNotification } from '../services/notifications';
 
 const REMINDER_OPTIONS = [
   { value: 0, label: 'None' },
@@ -442,6 +442,18 @@ export default function TodoDetailScreen({ route, navigation }) {
         <View style={styles.field}>
           <Text style={styles.label}>Reminders</Text>
           <Text style={styles.reminderHint}>Choose up to 3 (e.g. 1 day, 2 hours, 30 min)</Text>
+          {Platform.OS === 'web' && (
+            <TouchableOpacity
+              style={styles.testReminderButton}
+              onPress={async () => {
+                await scheduleTestNotification();
+                Alert.alert('Test reminder', 'A notification will appear in 10 seconds if permission is granted.');
+              }}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.testReminderButtonText}>Test reminder (10 sec)</Text>
+            </TouchableOpacity>
+          )}
           {[
             { label: '1st reminder', value: reminder1, setValue: setReminder1 },
             { label: '2nd reminder', value: reminder2, setValue: setReminder2 },
@@ -623,6 +635,19 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#666',
     marginBottom: 10,
+  },
+  testReminderButton: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#6200ee',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    marginBottom: 12,
+  },
+  testReminderButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
   },
   reminderRow: {
     marginBottom: 14,
