@@ -165,21 +165,25 @@ export async function cancelReminder(TaskID) {
  */
 export async function scheduleTestNotification() {
   if (Platform.OS === 'web') {
-    if (typeof Notification === 'undefined') {
-      console.warn('Browser does not support Notification API');
-      return;
-    }
-    if (Notification.permission !== 'granted') {
-      const granted = await requestReminderPermissions();
-      if (!granted) return;
-    }
-    setTimeout(() => {
-      try {
-        new Notification('DailyDuty test', { body: 'Reminder test — if you see this, reminders work!' });
-      } catch (e) {
-        console.warn('Test notification failed:', e);
+    try {
+      if (typeof Notification === 'undefined') {
+        console.warn('Browser does not support Notification API');
+        return;
       }
-    }, 10 * 1000);
+      if (Notification.permission !== 'granted') {
+        const granted = await requestReminderPermissions();
+        if (!granted) return;
+      }
+      setTimeout(() => {
+        try {
+          new Notification('DailyDuty test', { body: 'Reminder test — if you see this, reminders work!' });
+        } catch (e) {
+          console.warn('Test notification failed:', e);
+        }
+      }, 10 * 1000);
+    } catch (e) {
+      console.warn('Test notification error:', e);
+    }
     return;
   }
   if (!Notifications) return;
