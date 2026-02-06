@@ -26,6 +26,7 @@ const REMINDER_CHANNEL_ID = 'todo-reminders';
 
 // Web: keep timeouts so we can cancel them (only works while tab is open)
 const webTimeouts = {};
+let webTestNotificationTimeoutId = null;
 
 export async function requestReminderPermissions() {
   if (Platform.OS === 'web') {
@@ -174,7 +175,12 @@ export async function scheduleTestNotification() {
         const granted = await requestReminderPermissions();
         if (!granted) return;
       }
-      setTimeout(() => {
+      if (webTestNotificationTimeoutId != null) {
+        clearTimeout(webTestNotificationTimeoutId);
+        webTestNotificationTimeoutId = null;
+      }
+      webTestNotificationTimeoutId = setTimeout(() => {
+        webTestNotificationTimeoutId = null;
         try {
           new Notification('DailyDuty test', { body: 'Reminder test — if you see this, reminders work!' });
         } catch (e) {
