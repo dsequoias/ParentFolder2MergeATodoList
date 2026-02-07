@@ -28,10 +28,19 @@ const REMINDER_CHANNEL_ID = 'todo-reminders';
 const webTimeouts = {};
 let webTestNotificationTimeoutId = null;
 
+/** Web: check if notifications are supported (secure context + API). */
+export function isNotificationSupported() {
+  if (Platform.OS !== 'web') return true;
+  if (typeof window === 'undefined') return false;
+  if (typeof Notification === 'undefined') return false;
+  if (!window.isSecureContext) return false;
+  return true;
+}
+
 export async function requestReminderPermissions() {
   if (Platform.OS === 'web') {
     try {
-      if (typeof Notification === 'undefined') return false;
+      if (!isNotificationSupported()) return false;
       if (Notification.permission === 'granted') return true;
       if (Notification.permission === 'denied') return false;
       const permission = await Notification.requestPermission();
@@ -84,7 +93,7 @@ export async function scheduleReminders(TaskID, taskTitle, dueDate, dueTime, rem
   if (Platform.OS === 'web') {
     try {
       await cancelReminder(TaskID);
-      if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+      if (!isNotificationSupported() || Notification.permission !== 'granted') return;
       const due = parseDueDateTime(dueDate, dueTime);
       if (!due || isNaN(due.getTime())) return;
       const minutes = Array.isArray(reminderMinutesArray) ? reminderMinutesArray.slice(0, 3) : [];
@@ -160,20 +169,40 @@ export async function cancelReminder(TaskID) {
   } catch (_) {}
 }
 
+/** Web: play a short beep as fallback when notification may be suppressed (e.g. tab in background). */
+function playTestBeep() {
+  try {
+    if (typeof window === 'undefined' || !window.AudioContext && !window.webkitAudioContext) return;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.value = 880;
+    osc.type = 'sine';
+    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.3);
+  } catch (_) {}
+}
+
 /**
- * Schedule a single notification in 10 seconds for testing (web + native).
- * Call requestReminderPermissions() first so permission is granted.
+ * Schedule a single test notification (web: 3 seconds + beep fallback; native: 10 seconds).
+ * On web, permission must be granted first; call requestReminderPermissions() from a user gesture (e.g. button click).
  */
 export async function scheduleTestNotification() {
   if (Platform.OS === 'web') {
+    const TEST_DELAY_MS = 3 * 1000;
     try {
-      if (typeof Notification === 'undefined') {
-        console.warn('Browser does not support Notification API');
-        return;
+      if (!isNotificationSupported()) {
+        console.warn('Notifications require HTTPS or localhost and a supporting browser.');
+        return { ok: false, reason: 'not-supported' };
       }
       if (Notification.permission !== 'granted') {
         const granted = await requestReminderPermissions();
-        if (!granted) return;
+        if (!granted) return { ok: false, reason: 'permission-denied' };
       }
       if (webTestNotificationTimeoutId != null) {
         clearTimeout(webTestNotificationTimeoutId);
@@ -182,15 +211,22 @@ export async function scheduleTestNotification() {
       webTestNotificationTimeoutId = setTimeout(() => {
         webTestNotificationTimeoutId = null;
         try {
-          new Notification('DailyDuty test', { body: 'Reminder test — if you see this, reminders work!' });
+          const n = new Notification('DailyDuty reminder', {
+            body: 'Reminder test — if you see this, reminders work!',
+            tag: 'todo-test',
+            requireInteraction: false,
+          });
+          if (typeof window !== 'undefined' && window.focus) n.onclick = () => window.focus();
         } catch (e) {
           console.warn('Test notification failed:', e);
         }
-      }, 10 * 1000);
+        playTestBeep();
+      }, TEST_DELAY_MS);
+      return { ok: true, delaySeconds: 3 };
     } catch (e) {
       console.warn('Test notification error:', e);
+      return { ok: false, reason: String(e?.message || e) };
     }
-    return;
   }
   if (!Notifications) return;
   try {

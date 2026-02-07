@@ -10,7 +10,7 @@ import {
   Platform,
 } from 'react-native';
 import { getTodoById, insertTodo, updateTodo } from '../services/database';
-import { requestReminderPermissions, scheduleReminders, cancelReminder, scheduleTestNotification } from '../services/notifications';
+import { isNotificationSupported, requestReminderPermissions, scheduleReminders, cancelReminder, scheduleTestNotification } from '../services/notifications';
 
 const REMINDER_OPTIONS = [
   { value: 0, label: 'None' },
@@ -446,12 +446,33 @@ export default function TodoDetailScreen({ route, navigation }) {
             <TouchableOpacity
               style={styles.testReminderButton}
               onPress={async () => {
-                await scheduleTestNotification();
-                Alert.alert('Test reminder', 'A notification will appear in 10 seconds if permission is granted.');
+                if (!isNotificationSupported()) {
+                  Alert.alert('Not supported', 'Notifications need HTTPS or localhost. Open this app via http://localhost (or your HTTPS URL) and try again.');
+                  return;
+                }
+                if (typeof Notification !== 'undefined' && Notification.permission === 'denied') {
+                  Alert.alert('Permission denied', 'Allow notifications in your browser (e.g. Firefox: lock icon → Permissions → Notifications) and reload the page.');
+                  return;
+                }
+                if (typeof Notification === 'undefined' || Notification.permission !== 'granted') {
+                  const granted = await requestReminderPermissions();
+                  if (!granted) {
+                    Alert.alert('Permission needed', 'Please allow notifications when the browser asks, then tap "Test reminder" again.');
+                    return;
+                  }
+                }
+                const result = await scheduleTestNotification();
+                if (result?.ok) {
+                  Alert.alert('Test reminder', 'A notification and short sound will appear in 3 seconds. Keep this tab open and visible for best results.');
+                } else if (result?.reason === 'permission-denied') {
+                  Alert.alert('Permission denied', 'Notifications were blocked. Allow them in your browser settings and try again.');
+                } else if (result?.reason) {
+                  Alert.alert('Error', result.reason);
+                }
               }}
               activeOpacity={0.8}
             >
-              <Text style={styles.testReminderButtonText}>Test reminder (10 sec)</Text>
+              <Text style={styles.testReminderButtonText}>Test reminder (3 sec)</Text>
             </TouchableOpacity>
           )}
           {[
