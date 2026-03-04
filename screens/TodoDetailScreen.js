@@ -14,6 +14,7 @@ import { isNotificationSupported, requestReminderPermissions, scheduleReminders,
 
 const REMINDER_OPTIONS = [
   { value: 0, label: 'None' },
+  { value: -1, label: 'At due time' },
   { value: 5, label: '5 minutes before' },
   { value: 15, label: '15 minutes before' },
   { value: 30, label: '30 minutes before' },
@@ -216,7 +217,7 @@ export default function TodoDetailScreen({ route, navigation }) {
         Alert.alert('Success', 'Todo created successfully');
       }
 
-      const hasReminders = (reminder1 > 0 || reminder2 > 0 || reminder3 > 0);
+      const hasReminders = (reminder1 !== 0 || reminder2 !== 0 || reminder3 !== 0);
       if (hasReminders && dueDate && dueTime) {
         const granted = await requestReminderPermissions();
         if (granted) {

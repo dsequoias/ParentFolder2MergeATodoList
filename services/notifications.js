@@ -100,8 +100,9 @@ export async function scheduleReminders(TaskID, taskTitle, dueDate, dueTime, rem
       const ids = [];
       for (let i = 0; i < minutes.length; i++) {
         const reminderMinutes = minutes[i];
-        if (!reminderMinutes || reminderMinutes <= 0) continue;
-        const triggerDate = new Date(due.getTime() - reminderMinutes * 60 * 1000);
+        if (reminderMinutes === 0) continue; // None
+        const offsetMs = reminderMinutes === -1 ? 0 : reminderMinutes * 60 * 1000; // -1 = at due time
+        const triggerDate = new Date(due.getTime() - offsetMs);
         const ms = triggerDate.getTime() - Date.now();
         if (ms <= 0) continue;
         const id = setTimeout(() => {
@@ -125,8 +126,9 @@ export async function scheduleReminders(TaskID, taskTitle, dueDate, dueTime, rem
     const minutes = Array.isArray(reminderMinutesArray) ? reminderMinutesArray.slice(0, 3) : [];
     for (let i = 0; i < minutes.length; i++) {
       const reminderMinutes = minutes[i];
-      if (!reminderMinutes || reminderMinutes <= 0) continue;
-      const triggerDate = new Date(due.getTime() - reminderMinutes * 60 * 1000);
+      if (reminderMinutes === 0) continue; // None
+      const offsetMs = reminderMinutes === -1 ? 0 : reminderMinutes * 60 * 1000; // -1 = at due time
+      const triggerDate = new Date(due.getTime() - offsetMs);
       if (triggerDate.getTime() <= Date.now()) continue;
       const identifier = `todo-${TaskID}-${i + 1}`;
       await Notifications.scheduleNotificationAsync({
@@ -228,10 +230,10 @@ export async function scheduleTestNotification() {
       return { ok: false, reason: String(e?.message || e) };
     }
   }
-  if (!Notifications) return;
+  if (!Notifications) return { ok: false, reason: 'Notifications not available' };
   try {
     const granted = await requestReminderPermissions();
-    if (!granted) return;
+    if (!granted) return { ok: false, reason: 'permission-denied' };
     const triggerDate = new Date(Date.now() + 10 * 1000);
     await Notifications.scheduleNotificationAsync({
       identifier: 'todo-test-10sec',
@@ -243,7 +245,9 @@ export async function scheduleTestNotification() {
       },
       trigger: { type: 'date', date: triggerDate },
     });
+    return { ok: true, delaySeconds: 10 };
   } catch (e) {
     console.warn('Test notification error:', e);
+    return { ok: false, reason: String(e?.message || e) };
   }
 }
