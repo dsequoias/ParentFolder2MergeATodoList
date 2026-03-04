@@ -174,7 +174,7 @@ export async function cancelReminder(TaskID) {
 /** Web: play a short beep as fallback when notification may be suppressed (e.g. tab in background). */
 function playTestBeep() {
   try {
-    if (typeof window === 'undefined' || !window.AudioContext && !window.webkitAudioContext) return;
+    if (typeof window === 'undefined' || (!window.AudioContext && !window.webkitAudioContext)) return;
     const Ctx = window.AudioContext || window.webkitAudioContext;
     const ctx = new Ctx();
     const osc = ctx.createOscillator();
