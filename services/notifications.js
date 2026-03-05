@@ -1,22 +1,31 @@
 /**
  * Schedule/cancel reminder notifications for tasks.
- * Native: expo-notifications.
+ * Native: expo-notifications (when available) + in-app alert fallback when app is open.
  * Web: browser Notification API + setTimeout (reminders only fire while tab is open).
  */
-import { Platform } from 'react-native';
+import { Platform, Alert, AppState } from 'react-native';
+
+let Audio = null;
+if (Platform.OS !== 'web') {
+  try {
+    Audio = require('expo-av').Audio;
+  } catch (_) {}
+}
 
 let Notifications = null;
 if (Platform.OS !== 'web') {
   try {
     Notifications = require('expo-notifications').default;
-    Notifications.setNotificationHandler({
-      handleNotification: async () => ({
-        shouldShowBanner: true,
-        shouldShowList: true,
-        shouldPlaySound: true,
-        shouldSetBadge: false,
-      }),
-    });
+    if (Notifications && typeof Notifications.setNotificationHandler === 'function') {
+      Notifications.setNotificationHandler({
+        handleNotification: async () => ({
+          shouldShowBanner: true,
+          shouldShowList: true,
+          shouldPlaySound: true,
+          shouldSetBadge: false,
+        }),
+      });
+    }
   } catch (e) {
     console.warn('expo-notifications not available:', e);
   }
@@ -57,6 +66,8 @@ export async function requestReminderPermissions() {
         name: 'Task reminders',
         importance: Notifications.AndroidImportance.HIGH,
         sound: true,
+        enableVibrate: true,
+        vibrationPattern: [0, 250, 250, 250],
       });
     }
     const { status: existing } = await Notifications.getPermissionsAsync();
@@ -85,6 +96,100 @@ function parseDueDateTime(dueDate, dueTime) {
   return new Date(y, m - 1, d, h, min, s);
 }
 
+// In-app reminder fallback when system notifications don't fire (e.g. expo-notifications not loaded)
+const FOREGROUND_CHECK_INTERVAL_MS = 15 * 1000;  // check every 15s so we don't miss the minute
+const REMINDER_WINDOW_AFTER_MS = 5 * 60 * 1000;  // show popup if user opens app up to 5 min after reminder time
+const REMINDER_WINDOW_BEFORE_MS = 30 * 1000;     // show up to 30s before
+const shownForegroundKeys = new Map(); // key -> timestamp when shown
+
+/** Play a short sound when the in-app reminder pops up (native only; web uses playTestBeep). */
+async function playReminderSound() {
+  if (Platform.OS === 'web') return;
+  if (!Audio) return;
+  try {
+    await Audio.setAudioModeAsync({
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: false,
+      shouldDuckAndroid: true,
+      playThroughEarpieceAndroid: false,
+    });
+    const { sound } = await Audio.Sound.createAsync(
+      { uri: 'https://assets.mixkit.co/active_storage/sfx/2869-notification-perfect.mp3' },
+      { shouldPlay: true }
+    );
+    sound.setOnPlaybackStatusUpdate((status) => {
+      if (status?.didJustFinish) sound.unloadAsync();
+    });
+  } catch (_) {}
+}
+
+async function checkForegroundReminders(getTodos) {
+  try {
+    const todos = await getTodos();
+    if (!Array.isArray(todos)) return;
+    const now = Date.now();
+    for (const todo of todos) {
+      if (todo.Completed === 1) continue;
+      const dueDate = todo.DueDate ?? todo.Date ?? null;
+      const dueTime = todo.DueTime ?? todo.Time ?? null;
+      const r1 = todo.ReminderMinutes ?? 0;
+      const r2 = todo.Reminder2Minutes ?? 0;
+      const r3 = todo.Reminder3Minutes ?? 0;
+      if (!dueDate || (r1 === 0 && r2 === 0 && r3 === 0)) continue;
+      const due = parseDueDateTime(dueDate, dueTime);
+      if (!due || isNaN(due.getTime())) continue;
+      const minutes = [r1, r2, r3];
+      for (let i = 0; i < minutes.length; i++) {
+        const reminderMinutes = minutes[i];
+        if (reminderMinutes === 0) continue;
+        const offsetMs = reminderMinutes === -1 ? 0 : reminderMinutes * 60 * 1000;
+        const triggerTs = due.getTime() - offsetMs;
+        const key = `${todo.TaskID}-${i}-${triggerTs}`;
+        if (triggerTs <= now + REMINDER_WINDOW_BEFORE_MS && triggerTs >= now - REMINDER_WINDOW_AFTER_MS) {
+          if (!shownForegroundKeys.has(key)) {
+            shownForegroundKeys.set(key, now);
+            playReminderSound();
+            Alert.alert('Reminder', (todo.Task || 'Task') + (dueTime ? ` — due ${dueTime}` : ''));
+          }
+        }
+      }
+    }
+    for (const [key, ts] of shownForegroundKeys.entries()) {
+      if (now - ts > 5 * 60 * 1000) shownForegroundKeys.delete(key);
+    }
+  } catch (_) {}
+}
+
+let foregroundCheckerInterval = null;
+let foregroundCheckerSubscription = null;
+
+/**
+ * Start checking for due reminders while the app is open. Shows an in-app Alert when a reminder
+ * is due, even if system notifications (expo-notifications) are not working.
+ * Call once after DB is ready, e.g. from App.js with getTodos = () => getAllTodos().
+ * Returns a cleanup function to stop the checker.
+ */
+export function startForegroundReminderChecker(getTodos) {
+  if (typeof getTodos !== 'function') return () => {};
+  if (foregroundCheckerInterval) clearInterval(foregroundCheckerInterval);
+  if (foregroundCheckerSubscription) foregroundCheckerSubscription.remove();
+  checkForegroundReminders(getTodos);
+  foregroundCheckerInterval = setInterval(() => checkForegroundReminders(getTodos), FOREGROUND_CHECK_INTERVAL_MS);
+  foregroundCheckerSubscription = AppState.addEventListener('change', (state) => {
+    if (state === 'active') checkForegroundReminders(getTodos);
+  });
+  return () => {
+    if (foregroundCheckerInterval) {
+      clearInterval(foregroundCheckerInterval);
+      foregroundCheckerInterval = null;
+    }
+    if (foregroundCheckerSubscription) {
+      foregroundCheckerSubscription.remove();
+      foregroundCheckerSubscription = null;
+    }
+  };
+}
+
 /**
  * Schedule up to 3 reminder notifications for a task.
  * On web: uses setTimeout; reminders only fire while the tab is open.
@@ -109,6 +214,7 @@ export async function scheduleReminders(TaskID, taskTitle, dueDate, dueTime, rem
           try {
             new Notification('Reminder', { body: taskTitle });
           } catch (_) {}
+          playTestBeep();
         }, ms);
         ids.push(id);
       }
@@ -138,7 +244,11 @@ export async function scheduleReminders(TaskID, taskTitle, dueDate, dueTime, rem
           body: taskTitle,
           data: { TaskID, taskTitle },
           sound: true,
-          ...(Platform.OS === 'android' && { channelId: REMINDER_CHANNEL_ID }),
+          ...(Platform.OS === 'android' && {
+            channelId: REMINDER_CHANNEL_ID,
+            vibrate: [0, 250, 250, 250],
+            priority: Notifications.AndroidNotificationPriority?.MAX ?? 'max',
+          }),
         },
         trigger: {
           type: 'date',
@@ -148,6 +258,26 @@ export async function scheduleReminders(TaskID, taskTitle, dueDate, dueTime, rem
     }
   } catch (e) {
     console.warn('Schedule reminders error:', e);
+  }
+}
+
+/**
+ * Reschedule reminders for all incomplete todos that have due date, time, and at least one reminder.
+ * Call after loading the todo list so reminders work after app start/refresh (web) and are restored (native).
+ */
+export async function scheduleRemindersForTodoList(todos) {
+  if (!Array.isArray(todos)) return;
+  for (const todo of todos) {
+    if (todo.Completed === 1) continue;
+    const dueDate = todo.DueDate ?? todo.Date ?? null;
+    const dueTime = todo.DueTime ?? todo.Time ?? null;
+    const r1 = todo.ReminderMinutes ?? 0;
+    const r2 = todo.Reminder2Minutes ?? 0;
+    const r3 = todo.Reminder3Minutes ?? 0;
+    if (!dueDate || (r1 === 0 && r2 === 0 && r3 === 0)) continue;
+    try {
+      await scheduleReminders(todo.TaskID, todo.Task ?? '', dueDate, dueTime, [r1, r2, r3]);
+    } catch (_) {}
   }
 }
 
@@ -171,22 +301,26 @@ export async function cancelReminder(TaskID) {
   } catch (_) {}
 }
 
-/** Web: play a short beep as fallback when notification may be suppressed (e.g. tab in background). */
+/** Web: play a short double beep so the reminder is audible (e.g. when notification is suppressed). */
 function playTestBeep() {
   try {
     if (typeof window === 'undefined' || (!window.AudioContext && !window.webkitAudioContext)) return;
     const Ctx = window.AudioContext || window.webkitAudioContext;
     const ctx = new Ctx();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.frequency.value = 880;
-    osc.type = 'sine';
-    gain.gain.setValueAtTime(0.15, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
-    osc.start(ctx.currentTime);
-    osc.stop(ctx.currentTime + 0.3);
+    const playTone = (startTime, duration) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = 880;
+      osc.type = 'sine';
+      gain.gain.setValueAtTime(0.2, startTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, startTime + duration);
+      osc.start(startTime);
+      osc.stop(startTime + duration);
+    };
+    playTone(ctx.currentTime, 0.2);
+    playTone(ctx.currentTime + 0.35, 0.25);
   } catch (_) {}
 }
 
@@ -241,7 +375,11 @@ export async function scheduleTestNotification() {
         title: 'DailyDuty test',
         body: 'Reminder test — if you see this, reminders work!',
         sound: true,
-        ...(Platform.OS === 'android' && { channelId: REMINDER_CHANNEL_ID }),
+        ...(Platform.OS === 'android' && {
+          channelId: REMINDER_CHANNEL_ID,
+          vibrate: [0, 250, 250, 250],
+          priority: (Notifications.AndroidNotificationPriority && Notifications.AndroidNotificationPriority.MAX) || 'max',
+        }),
       },
       trigger: { type: 'date', date: triggerDate },
     });

@@ -5,7 +5,8 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'expo-status-bar';
 import ErrorBoundary from './components/ErrorBoundary';
 import { SettingsProvider } from './contexts/SettingsContext';
-import { initDatabase } from './services/database';
+import { initDatabase, getAllTodos } from './services/database';
+import { startForegroundReminderChecker } from './services/notifications';
 import TodoListScreen from './screens/TodoListScreen';
 import TodoDetailScreen from './screens/TodoDetailScreen';
 
@@ -15,6 +16,7 @@ export default function App() {
   const [dbInitialized, setDbInitialized] = useState(false);
 
   useEffect(() => {
+    let stopForegroundChecker = () => {};
     const initializeApp = async () => {
       try {
         console.log('Initializing database...');
@@ -25,12 +27,15 @@ export default function App() {
         console.error('Error details:', error.message || error);
         // Continue anyway - database might still work or we'll handle errors in components
       } finally {
-        // Always set initialized to true so UI can render
         setDbInitialized(true);
+        stopForegroundChecker = startForegroundReminderChecker(() => getAllTodos());
       }
     };
 
     initializeApp();
+    return () => {
+      stopForegroundChecker();
+    };
   }, []);
 
   if (!dbInitialized) {
