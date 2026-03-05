@@ -6,9 +6,12 @@
 import { Platform, Alert, AppState } from 'react-native';
 
 let Audio = null;
+let InterruptionModeAndroid = null;
 if (Platform.OS !== 'web') {
   try {
-    Audio = require('expo-av').Audio;
+    const av = require('expo-av');
+    Audio = av.Audio;
+    InterruptionModeAndroid = av.InterruptionModeAndroid;
   } catch (_) {}
 }
 
@@ -103,24 +106,34 @@ const REMINDER_WINDOW_BEFORE_MS = 30 * 1000;     // show up to 30s before
 const shownForegroundKeys = new Map(); // key -> timestamp when shown
 
 /** Play a short sound when the in-app reminder pops up (native only; web uses playTestBeep). */
+// Bundled asset so playback works without network. Create via: node scripts/create-reminder-sound.js
+let REMINDER_SOUND_ASSET = null;
+try {
+  REMINDER_SOUND_ASSET = require('../assets/sounds/reminder.wav');
+} catch (_) {
+  // File missing if script wasn't run; reminders still show, just no sound
+}
+
 async function playReminderSound() {
   if (Platform.OS === 'web') return;
-  if (!Audio) return;
+  if (!Audio || !REMINDER_SOUND_ASSET) return;
   try {
     await Audio.setAudioModeAsync({
       playsInSilentModeIOS: true,
       staysActiveInBackground: false,
-      shouldDuckAndroid: true,
       playThroughEarpieceAndroid: false,
+      shouldDuckAndroid: false,
+      interruptionModeAndroid: InterruptionModeAndroid?.DoNotMix ?? 1,
     });
-    const { sound } = await Audio.Sound.createAsync(
-      { uri: 'https://assets.mixkit.co/active_storage/sfx/2869-notification-perfect.mp3' },
-      { shouldPlay: true }
-    );
+    const { sound } = await Audio.Sound.createAsync(REMINDER_SOUND_ASSET, { shouldPlay: false });
+    await sound.setVolumeAsync(1.0);
     sound.setOnPlaybackStatusUpdate((status) => {
       if (status?.didJustFinish) sound.unloadAsync();
     });
-  } catch (_) {}
+    await sound.playAsync();
+  } catch (e) {
+    console.warn('Reminder sound failed:', e?.message || e);
+  }
 }
 
 async function checkForegroundReminders(getTodos) {

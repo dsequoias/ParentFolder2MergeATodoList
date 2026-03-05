@@ -12,7 +12,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { getAllTodos, deleteTodo, toggleTodoCompletion } from '../services/database';
-import { cancelReminder } from '../services/notifications';
+import { cancelReminder, scheduleRemindersForTodoList } from '../services/notifications';
 import { useSettings } from '../contexts/SettingsContext';
 import MenuModal from '../components/MenuModal';
 
@@ -32,6 +32,7 @@ export default function TodoListScreen({ navigation }) {
     try {
       const todosList = await getAllTodos();
       setTodos(todosList);
+      await scheduleRemindersForTodoList(todosList);
     } catch (error) {
       Alert.alert('Error', 'Failed to load todos');
       console.error(error);
