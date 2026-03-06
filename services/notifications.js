@@ -105,8 +105,8 @@ const REMINDER_WINDOW_AFTER_MS = 5 * 60 * 1000;  // show popup if user opens app
 const REMINDER_WINDOW_BEFORE_MS = 30 * 1000;     // show up to 30s before
 const shownForegroundKeys = new Map(); // key -> timestamp when shown
 
-/** Play a short sound when the in-app reminder pops up (native only; web uses playTestBeep). */
-// Bundled asset so playback works without network. Create via: node scripts/create-reminder-sound.js
+/** Alarm-style looping sound when the in-app reminder pops up (native only; stops when user dismisses). */
+// Bundled asset. Create via: node scripts/create-reminder-sound.js
 let REMINDER_SOUND_ASSET = null;
 try {
   REMINDER_SOUND_ASSET = require('../assets/sounds/reminder.wav');
@@ -114,10 +114,24 @@ try {
   // File missing if script wasn't run; reminders still show, just no sound
 }
 
+let currentReminderSound = null;
+
+async function stopReminderSound() {
+  if (currentReminderSound) {
+    try {
+      await currentReminderSound.stopAsync();
+      await currentReminderSound.unloadAsync();
+    } catch (_) {}
+    currentReminderSound = null;
+  }
+}
+
+/** Start looping alarm sound; call stopReminderSound() when user dismisses the reminder (e.g. Alert onPress). */
 async function playReminderSound() {
   if (Platform.OS === 'web') return;
   if (!Audio || !REMINDER_SOUND_ASSET) return;
   try {
+    await stopReminderSound();
     await Audio.setAudioModeAsync({
       playsInSilentModeIOS: true,
       staysActiveInBackground: false,
@@ -126,13 +140,13 @@ async function playReminderSound() {
       interruptionModeAndroid: InterruptionModeAndroid?.DoNotMix ?? 1,
     });
     const { sound } = await Audio.Sound.createAsync(REMINDER_SOUND_ASSET, { shouldPlay: false });
+    currentReminderSound = sound;
     await sound.setVolumeAsync(1.0);
-    sound.setOnPlaybackStatusUpdate((status) => {
-      if (status?.didJustFinish) sound.unloadAsync();
-    });
+    await sound.setIsLoopingAsync(true);
     await sound.playAsync();
   } catch (e) {
     console.warn('Reminder sound failed:', e?.message || e);
+    currentReminderSound = null;
   }
 }
 
@@ -162,7 +176,8 @@ async function checkForegroundReminders(getTodos) {
           if (!shownForegroundKeys.has(key)) {
             shownForegroundKeys.set(key, now);
             playReminderSound();
-            Alert.alert('Reminder', (todo.Task || 'Task') + (dueTime ? ` — due ${dueTime}` : ''));
+            const message = (todo.Task || 'Task') + (dueTime ? ` — due ${dueTime}` : '');
+            Alert.alert('Reminder', message, [{ text: 'OK', onPress: stopReminderSound }]);
           }
         }
       }
