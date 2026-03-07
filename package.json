@@ -5,11 +5,13 @@
   "scripts": {
     "start": "expo start",
     "dev": "expo start --web",
-    "android": "expo run:android",
+    "android": "node scripts/patch-gradle-react-format.mjs && expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
     "build:android": "eas build --platform android --profile production",
     "fix-icon": "node scripts/fix-icon.mjs",
+    "copy-icons": "node scripts/copy-icons-from-new.mjs",
+    "remove-icon-bg": "node scripts/remove-icon-white-background.mjs",
     "prepare": "node scripts/create-reminder-sound.js"
   },
   "dependencies": {

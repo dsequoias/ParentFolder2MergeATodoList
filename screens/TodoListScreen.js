@@ -198,7 +198,7 @@ export default function TodoListScreen({ navigation }) {
           <Text style={styles.menuButtonText}>☰</Text>
         </TouchableOpacity>
         <View style={styles.headerLeft}>
-          <Text style={styles.headerTitle}>TodoApp</Text>
+          <Text style={styles.headerTitle}>My.Daily.Duty</Text>
           <Text style={styles.headerSummary}>
             {activeCount} active, {completedCount} completed
           </Text>

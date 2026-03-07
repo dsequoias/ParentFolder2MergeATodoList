@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "DailyDuty",
+    "name": "My.Daily.Duty",
     "slug": "DailyDuty",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -25,7 +25,7 @@
       "package": "com.dosDailyDuty",
       "adaptiveIcon": {
         "foregroundImage": "./assets/ddicon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#FFFFFF"
       }
     },
     "plugins": [
