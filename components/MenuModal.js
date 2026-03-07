@@ -11,13 +11,11 @@ import {
 } from 'react-native';
 import { useSettings, TIME_ZONES } from '../contexts/SettingsContext';
 
-const ABOUT_TEXT = `TodoList version 1.0.0 (Beta) 
-It used SQLite database to store the data.
-Build and maintained by David Sequoias
-Questions email: ds.us@hotmail.com
-
-© 2026-2032 David Sequoias. All rights reserved.
-`;
+const ABOUT_TEXT = `My.Daily.Duty version 1.0.0
+It used SQLite database to store your Data.
+It is built and maintained by David Sequoias
+Questions or suggestion email: ds.us@hotmail.com
+Copyright © 2026 DSM1 corp. All rights reserved.`;
 
 export default function MenuModal({ visible, onClose }) {
   const { timeZone, setTimeZone } = useSettings();
@@ -65,7 +63,7 @@ export default function MenuModal({ visible, onClose }) {
               {/* About - opens popup */}
               <Text style={styles.sectionTitle}>About</Text>
               <TouchableOpacity style={styles.aboutRow} onPress={openAbout} activeOpacity={0.7}>
-                <Text style={styles.aboutRowLabel}>About TodoList</Text>
+                <Text style={styles.aboutRowLabel}>About My.Daily.Duty</Text>
                 <Text style={styles.aboutRowArrow}>›</Text>
               </TouchableOpacity>
             </ScrollView>
