@@ -15,6 +15,13 @@ if (Platform.OS !== 'web') {
   } catch (_) {}
 }
 
+let Haptics = null;
+if (Platform.OS !== 'web') {
+  try {
+    Haptics = require('expo-haptics');
+  } catch (_) {}
+}
+
 let Notifications = null;
 if (Platform.OS !== 'web') {
   try {
@@ -86,17 +93,37 @@ export async function requestReminderPermissions() {
   }
 }
 
+/** Parse date string (YYYY-MM-DD or M/D/YY or M/D/YYYY) and optional time (HH:MM or HH:MM:SS). */
 function parseDueDateTime(dueDate, dueTime) {
   if (!dueDate) return null;
-  const [y, m, d] = dueDate.split('-').map(Number);
+  let y, m, d;
+  const isoMatch = String(dueDate).match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (isoMatch) {
+    [, y, m, d] = isoMatch.map(Number);
+  } else {
+    const slashParts = String(dueDate).split(/[/-]/).map((n) => parseInt(n, 10));
+    if (slashParts.length >= 3) {
+      if (slashParts[0] > 31) {
+        y = slashParts[0];
+        m = slashParts[1];
+        d = slashParts[2];
+      } else {
+        m = slashParts[0];
+        d = slashParts[1];
+        y = slashParts[2];
+        if (y < 100) y += 2000;
+      }
+    } else return null;
+  }
   let h = 0, min = 0, s = 0;
   if (dueTime) {
-    const parts = dueTime.split(':').map(Number);
+    const parts = String(dueTime).split(':').map(Number);
     h = parts[0] || 0;
     min = parts[1] || 0;
     s = parts[2] || 0;
   }
-  return new Date(y, m - 1, d, h, min, s);
+  const date = new Date(y, m - 1, d, h, min, s);
+  return isNaN(date.getTime()) ? null : date;
 }
 
 // In-app reminder fallback when system notifications don't fire (e.g. expo-notifications not loaded)
@@ -126,9 +153,19 @@ async function stopReminderSound() {
   }
 }
 
+/** Trigger haptic feedback so user feels the reminder even if sound fails (native only). */
+function triggerReminderHaptic() {
+  if (Platform.OS === 'web' || !Haptics) return;
+  try {
+    const type = Haptics.NotificationFeedbackType?.Warning ?? Haptics.NotificationFeedbackType ?? 1;
+    Haptics.notificationAsync(type);
+  } catch (_) {}
+}
+
 /** Start looping alarm sound; call stopReminderSound() when user dismisses the reminder (e.g. Alert onPress). */
 async function playReminderSound() {
   if (Platform.OS === 'web') return;
+  triggerReminderHaptic();
   if (!Audio || !REMINDER_SOUND_ASSET) return;
   try {
     await stopReminderSound();
@@ -176,6 +213,7 @@ async function checkForegroundReminders(getTodos) {
           if (!shownForegroundKeys.has(key)) {
             shownForegroundKeys.set(key, now);
             playReminderSound();
+            if (Platform.OS === 'web') playTestBeep();
             const message = (todo.Task || 'Task') + (dueTime ? ` — due ${dueTime}` : '');
             Alert.alert('Reminder', message, [{ text: 'OK', onPress: stopReminderSound }]);
           }
@@ -347,8 +385,15 @@ function playTestBeep() {
       osc.start(startTime);
       osc.stop(startTime + duration);
     };
-    playTone(ctx.currentTime, 0.2);
-    playTone(ctx.currentTime + 0.35, 0.25);
+    const play = () => {
+      playTone(ctx.currentTime, 0.2);
+      playTone(ctx.currentTime + 0.35, 0.25);
+    };
+    if (ctx.state === 'suspended') {
+      ctx.resume().then(play).catch(() => {});
+    } else {
+      play();
+    }
   } catch (_) {}
 }
 

@@ -59,5 +59,9 @@ for (let i = 0; i < numSamples; i++) {
 }
 
 const outPath = path.join(dir, 'reminder.wav');
-fs.writeFileSync(outPath, buf);
-console.log('Created', outPath);
+try {
+  fs.writeFileSync(outPath, buf);
+  console.log('Created', outPath);
+} catch (e) {
+  console.warn('Could not create reminder.wav:', e.message);
+}
