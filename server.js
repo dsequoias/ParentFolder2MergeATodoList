@@ -28,7 +28,7 @@ try {
       Time TIME,
       Completed INTEGER DEFAULT 0 CHECK(Completed IN (0, 1)),
       Notes TEXT CHECK(length(Notes) <= 70),
-      CompletDateTime DATETIME
+      CompletDateTime DATETIME DEFAULT (datetime('now', 'localtime'))
     );
     CREATE INDEX IF NOT EXISTS idx_todostb_date ON TodosTB(Date);
     CREATE INDEX IF NOT EXISTS idx_todostb_completed ON TodosTB(Completed);
