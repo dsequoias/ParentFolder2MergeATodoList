@@ -79,6 +79,20 @@ export const initDatabase = async () => {
 
 export const getDatabase = () => null;
 
+/** Clear all data: localStorage and optionally server (when using API). */
+export const resetDatabase = async () => {
+  if (typeof localStorage !== 'undefined') {
+    localStorage.removeItem(STORAGE_KEY);
+  }
+  nextTaskID = 1;
+  const apiOk = await ensureMode();
+  if (apiOk) {
+    try {
+      await fetch(`${API_BASE}/reset`, { method: 'POST' });
+    } catch (_) {}
+  }
+};
+
 export const getAllTodos = async () => {
   if (await ensureMode()) {
     try {
@@ -124,6 +138,7 @@ export const insertTodo = async (todo) => {
           ReminderMinutes: todo.ReminderMinutes ?? 0,
           Reminder2Minutes: todo.Reminder2Minutes ?? 0,
           Reminder3Minutes: todo.Reminder3Minutes ?? 0,
+          RemindersJSON: todo.RemindersJSON ?? null,
         }),
       });
       if (!r.ok) throw new Error((await r.json()).error || r.statusText);
@@ -146,6 +161,7 @@ export const insertTodo = async (todo) => {
     ReminderMinutes: todo.ReminderMinutes ?? 0,
     Reminder2Minutes: todo.Reminder2Minutes ?? 0,
     Reminder3Minutes: todo.Reminder3Minutes ?? 0,
+    RemindersJSON: todo.RemindersJSON ?? null,
   };
   list.push(row);
   saveTodos(list);
@@ -168,6 +184,7 @@ export const updateTodo = async (TaskID, todo) => {
           ReminderMinutes: todo.ReminderMinutes ?? 0,
           Reminder2Minutes: todo.Reminder2Minutes ?? 0,
           Reminder3Minutes: todo.Reminder3Minutes ?? 0,
+          RemindersJSON: todo.RemindersJSON ?? null,
         }),
       });
       if (!r.ok) throw new Error((await r.json()).error || r.statusText);
@@ -190,6 +207,7 @@ export const updateTodo = async (TaskID, todo) => {
     ReminderMinutes: todo.ReminderMinutes ?? 0,
     Reminder2Minutes: todo.Reminder2Minutes ?? 0,
     Reminder3Minutes: todo.Reminder3Minutes ?? 0,
+    RemindersJSON: todo.RemindersJSON ?? null,
   };
   saveTodos(list);
   return true;

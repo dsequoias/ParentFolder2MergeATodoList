@@ -3,15 +3,16 @@
  * Native: expo-notifications (when available) + in-app alert fallback when app is open.
  * Web: browser Notification API + setTimeout (reminders only fire while tab is open).
  */
-import { Platform, Alert, AppState } from 'react-native';
+import { Platform, Alert, AppState, Linking } from 'react-native';
+import { MAX_REMINDERS, reminderMinutesArrayFromTodo } from './reminderUtils';
 
-let Audio = null;
-let InterruptionModeAndroid = null;
+let createAudioPlayer = null;
+let setAudioModeAsync = null;
 if (Platform.OS !== 'web') {
   try {
-    const av = require('expo-av');
-    Audio = av.Audio;
-    InterruptionModeAndroid = av.InterruptionModeAndroid;
+    const audio = require('expo-audio');
+    createAudioPlayer = audio.createAudioPlayer;
+    setAudioModeAsync = audio.setAudioModeAsync;
   } catch (_) {}
 }
 
@@ -41,7 +42,69 @@ if (Platform.OS !== 'web') {
   }
 }
 
-const REMINDER_CHANNEL_ID = 'todo-reminders';
+/** New channel id so installs pick up MAX importance + alarm audio (old channel settings stick otherwise). */
+const REMINDER_CHANNEL_ID = 'todo-alarm-v1';
+
+function getAndroidPackageName() {
+  try {
+    const Constants = require('expo-constants').default;
+    return Constants?.expoConfig?.android?.package || 'com.dosDailyDuty';
+  } catch (_) {
+    return 'com.dosDailyDuty';
+  }
+}
+
+/** Android 12+: opens system screen to allow exact alarm scheduling (required for on-time delivery). */
+export function openAndroidExactAlarmSettings() {
+  if (Platform.OS !== 'android') return;
+  try {
+    const IntentLauncher = require('expo-intent-launcher');
+    const action =
+      IntentLauncher.ActivityAction?.REQUEST_SCHEDULE_EXACT_ALARM ||
+      'android.settings.REQUEST_SCHEDULE_EXACT_ALARM';
+    const pkg = getAndroidPackageName();
+    IntentLauncher.startActivityAsync(action, { data: `package:${pkg}` }).catch(() => {});
+  } catch (_) {
+    try {
+      Linking.openSettings();
+    } catch (_) {}
+  }
+}
+
+/**
+ * On Android, prompt for exact alarms + battery — required for background alarms on time.
+ * Shown after scheduling (settings can reset after reboot).
+ */
+function promptBackgroundReminderSettingsIfNeeded() {
+  if (Platform.OS !== 'android') return;
+  Alert.alert(
+    'Alarms when app is in background',
+    'For reminders to ring on time when My.Daily.Duty is closed or in the background:\n\n1. Tap "Allow exact alarms" and turn it ON for this app\n2. Tap "App settings" → Battery → Unrestricted (if available)\n3. Use the Home button instead of swiping the app away from Recents',
+    [
+      { text: 'Later' },
+      { text: 'Allow exact alarms', onPress: openAndroidExactAlarmSettings },
+      {
+        text: 'App settings',
+        onPress: () => {
+          try {
+            Linking.openSettings();
+          } catch (_) {}
+        },
+      },
+    ]
+  );
+}
+
+/** Normalize task name from todo row (DB may return Task or task) or string; never empty for display. */
+function getTaskName(todoOrTitle) {
+  if (todoOrTitle == null) return 'Task';
+  if (typeof todoOrTitle === 'string') {
+    const t = todoOrTitle.trim();
+    return t || 'Task';
+  }
+  const name = (todoOrTitle.Task ?? todoOrTitle.task ?? '').toString().trim();
+  return name || 'Task';
+}
 
 // Web: keep timeouts so we can cancel them (only works while tab is open)
 const webTimeouts = {};
@@ -54,6 +117,41 @@ export function isNotificationSupported() {
   if (typeof Notification === 'undefined') return false;
   if (!window.isSecureContext) return false;
   return true;
+}
+
+/** Android: (re)create high-priority alarm channel. Call before scheduling and from permission flow. */
+async function ensureAndroidReminderChannelConfigured() {
+  if (Platform.OS !== 'android' || !Notifications) return;
+  try {
+    const Imp = Notifications.AndroidImportance;
+    const Usage = Notifications.AndroidAudioUsage;
+    const Content = Notifications.AndroidAudioContentType;
+    await Notifications.setNotificationChannelAsync(REMINDER_CHANNEL_ID, {
+      name: 'Task alarms',
+      description: 'Reminder sounds at due times. Allow exact alarms in system settings for reliability.',
+      importance: Imp?.MAX ?? Imp?.HIGH ?? 7,
+      sound: 'default',
+      enableVibrate: true,
+      vibrationPattern: [0, 400, 200, 400, 200, 400, 200, 600],
+      enableLights: true,
+      ...(Usage &&
+        Content && {
+          audioAttributes: {
+            usage: Usage.ALARM,
+            contentType: Content.SONIFICATION,
+            flags: {
+              enforceAudibility: true,
+              requestHardwareAudioVideoSynchronization: false,
+            },
+          },
+        }),
+      ...(Notifications.AndroidNotificationVisibility && {
+        lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+      }),
+    });
+  } catch (e) {
+    console.warn('Reminder channel setup error:', e?.message || e);
+  }
 }
 
 export async function requestReminderPermissions() {
@@ -71,15 +169,7 @@ export async function requestReminderPermissions() {
   }
   if (!Notifications) return false;
   try {
-    if (Platform.OS === 'android') {
-      await Notifications.setNotificationChannelAsync(REMINDER_CHANNEL_ID, {
-        name: 'Task reminders',
-        importance: Notifications.AndroidImportance.HIGH,
-        sound: true,
-        enableVibrate: true,
-        vibrationPattern: [0, 250, 250, 250],
-      });
-    }
+    await ensureAndroidReminderChannelConfigured();
     const { status: existing } = await Notifications.getPermissionsAsync();
     let final = existing;
     if (existing !== 'granted') {
@@ -126,11 +216,28 @@ function parseDueDateTime(dueDate, dueTime) {
   return isNaN(date.getTime()) ? null : date;
 }
 
+/** Format due date/time for notification body so user sees when the task is due. */
+function formatDueForNotification(dueDate, dueTime) {
+  const due = parseDueDateTime(dueDate, dueTime);
+  if (!due || isNaN(due.getTime())) return 'Due soon';
+  const h = due.getHours();
+  const m = due.getMinutes();
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  const h12 = h % 12 || 12;
+  const timeStr = `${h12}:${String(m).padStart(2, '0')} ${ampm}`;
+  return `Due at ${timeStr}`;
+}
+
 // In-app reminder fallback when system notifications don't fire (e.g. expo-notifications not loaded)
-const FOREGROUND_CHECK_INTERVAL_MS = 15 * 1000;  // check every 15s so we don't miss the minute
-const REMINDER_WINDOW_AFTER_MS = 5 * 60 * 1000;  // show popup if user opens app up to 5 min after reminder time
-const REMINDER_WINDOW_BEFORE_MS = 30 * 1000;     // show up to 30s before
-const shownForegroundKeys = new Map(); // key -> timestamp when shown
+const FOREGROUND_CHECK_INTERVAL_MS = 10 * 1000;  // check every 10s so we don't miss the minute
+const REMINDER_WINDOW_AFTER_MS = 5 * 60 * 1000; // in-app catch-up only shortly after due (avoid confusing late meds with other tasks)
+const REMINDER_WINDOW_BEFORE_MS = 20 * 1000;     // only ~20s before due — avoids "alarm" a full minute early
+/** Extra buffer after grace ends before we forget we showed (must NOT use "5 min since show" — that caused duplicate popups). */
+const FOREGROUND_DEDUPE_CLEAR_AFTER_MS = 90 * 1000;
+/** In-app alarm loop stops automatically after this long (OK still stops sooner). Prevents runaway playback (e.g. 10+ minutes if dismiss never runs). */
+const REMINDER_SOUND_MAX_DURATION_MS = 2 * 60 * 1000; // 2 minutes
+// shownForegroundKeys: key -> { triggerTs } — one popup per (task, reminder slot, due instant); clear only after grace window + buffer
+const shownForegroundKeys = new Map();
 
 /** Alarm-style looping sound when the in-app reminder pops up (native only; stops when user dismisses). */
 // Bundled asset. Create via: node scripts/create-reminder-sound.js
@@ -142,12 +249,20 @@ try {
 }
 
 let currentReminderSound = null;
+let reminderSoundAutoStopTimer = null;
 
 async function stopReminderSound() {
+  if (reminderSoundAutoStopTimer != null) {
+    clearTimeout(reminderSoundAutoStopTimer);
+    reminderSoundAutoStopTimer = null;
+  }
   if (currentReminderSound) {
     try {
-      await currentReminderSound.stopAsync();
-      await currentReminderSound.unloadAsync();
+      currentReminderSound.loop = false;
+      currentReminderSound.pause();
+      if (typeof currentReminderSound.remove === 'function') {
+        currentReminderSound.remove();
+      }
     } catch (_) {}
     currentReminderSound = null;
   }
@@ -166,21 +281,27 @@ function triggerReminderHaptic() {
 async function playReminderSound() {
   if (Platform.OS === 'web') return;
   triggerReminderHaptic();
-  if (!Audio || !REMINDER_SOUND_ASSET) return;
+  if (!createAudioPlayer || !setAudioModeAsync || !REMINDER_SOUND_ASSET) return;
   try {
     await stopReminderSound();
-    await Audio.setAudioModeAsync({
-      playsInSilentModeIOS: true,
-      staysActiveInBackground: false,
-      playThroughEarpieceAndroid: false,
-      shouldDuckAndroid: false,
-      interruptionModeAndroid: InterruptionModeAndroid?.DoNotMix ?? 1,
+    await setAudioModeAsync({
+      playsInSilentMode: true,
+      shouldPlayInBackground: false,
+      interruptionMode: 'doNotMix',
+      shouldRouteThroughEarpiece: false,
     });
-    const { sound } = await Audio.Sound.createAsync(REMINDER_SOUND_ASSET, { shouldPlay: false });
-    currentReminderSound = sound;
-    await sound.setVolumeAsync(1.0);
-    await sound.setIsLoopingAsync(true);
-    await sound.playAsync();
+    const player = createAudioPlayer(REMINDER_SOUND_ASSET);
+    currentReminderSound = player;
+    player.volume = 1.0;
+    player.loop = true;
+    player.play();
+    if (reminderSoundAutoStopTimer != null) {
+      clearTimeout(reminderSoundAutoStopTimer);
+    }
+    reminderSoundAutoStopTimer = setTimeout(() => {
+      reminderSoundAutoStopTimer = null;
+      void stopReminderSound();
+    }, REMINDER_SOUND_MAX_DURATION_MS);
   } catch (e) {
     console.warn('Reminder sound failed:', e?.message || e);
     currentReminderSound = null;
@@ -196,32 +317,46 @@ async function checkForegroundReminders(getTodos) {
       if (todo.Completed === 1) continue;
       const dueDate = todo.DueDate ?? todo.Date ?? null;
       const dueTime = todo.DueTime ?? todo.Time ?? null;
-      const r1 = todo.ReminderMinutes ?? 0;
-      const r2 = todo.Reminder2Minutes ?? 0;
-      const r3 = todo.Reminder3Minutes ?? 0;
-      if (!dueDate || (r1 === 0 && r2 === 0 && r3 === 0)) continue;
+      const minutes = reminderMinutesArrayFromTodo(todo);
+      if (!dueDate || minutes.length === 0) continue;
       const due = parseDueDateTime(dueDate, dueTime);
       if (!due || isNaN(due.getTime())) continue;
-      const minutes = [r1, r2, r3];
       for (let i = 0; i < minutes.length; i++) {
         const reminderMinutes = minutes[i];
         if (reminderMinutes === 0) continue;
         const offsetMs = reminderMinutes === -1 ? 0 : reminderMinutes * 60 * 1000;
         const triggerTs = due.getTime() - offsetMs;
-        const key = `${todo.TaskID}-${i}-${triggerTs}`;
+        const key = `${todo.TaskID}|${i}|${triggerTs}`;
         if (triggerTs <= now + REMINDER_WINDOW_BEFORE_MS && triggerTs >= now - REMINDER_WINDOW_AFTER_MS) {
           if (!shownForegroundKeys.has(key)) {
-            shownForegroundKeys.set(key, now);
-            playReminderSound();
-            if (Platform.OS === 'web') playTestBeep();
-            const message = (todo.Task || 'Task') + (dueTime ? ` — due ${dueTime}` : '');
-            Alert.alert('Reminder', message, [{ text: 'OK', onPress: stopReminderSound }]);
+            shownForegroundKeys.set(key, { triggerTs });
+            const taskName = getTaskName(todo);
+            const dueStr = due ? `Due at ${due.getHours() % 12 || 12}:${String(due.getMinutes()).padStart(2, '0')} ${due.getHours() >= 12 ? 'PM' : 'AM'}` : '';
+            const message = dueStr ? `${dueStr}\n\n"${taskName}"` : `"${taskName}"`;
+            const dismissSound = () => {
+              void stopReminderSound();
+            };
+            if (Platform.OS === 'web') {
+              playTestBeep();
+            } else {
+              // Must await so OK/back dismiss cannot run before currentReminderSound is set (otherwise sound never stops).
+              await playReminderSound();
+            }
+            Alert.alert(
+              'Reminder: ' + taskName,
+              message,
+              [{ text: 'OK', onPress: dismissSound }],
+              Platform.OS === 'android' ? { cancelable: true, onDismiss: dismissSound } : undefined
+            );
           }
         }
       }
     }
-    for (const [key, ts] of shownForegroundKeys.entries()) {
-      if (now - ts > 5 * 60 * 1000) shownForegroundKeys.delete(key);
+    for (const [key, rec] of shownForegroundKeys.entries()) {
+      const ts = rec?.triggerTs;
+      if (typeof ts === 'number' && now > ts + REMINDER_WINDOW_AFTER_MS + FOREGROUND_DEDUPE_CLEAR_AFTER_MS) {
+        shownForegroundKeys.delete(key);
+      }
     }
   } catch (_) {}
 }
@@ -243,6 +378,7 @@ export function startForegroundReminderChecker(getTodos) {
   foregroundCheckerInterval = setInterval(() => checkForegroundReminders(getTodos), FOREGROUND_CHECK_INTERVAL_MS);
   foregroundCheckerSubscription = AppState.addEventListener('change', (state) => {
     if (state === 'active') checkForegroundReminders(getTodos);
+    if (state === 'background' || state === 'inactive') stopReminderSound();
   });
   return () => {
     if (foregroundCheckerInterval) {
@@ -257,7 +393,7 @@ export function startForegroundReminderChecker(getTodos) {
 }
 
 /**
- * Schedule up to 3 reminder notifications for a task.
+ * Schedule up to MAX_REMINDERS (24) reminder notifications for a task.
  * On web: uses setTimeout; reminders only fire while the tab is open.
  */
 export async function scheduleReminders(TaskID, taskTitle, dueDate, dueTime, reminderMinutesArray) {
@@ -267,7 +403,7 @@ export async function scheduleReminders(TaskID, taskTitle, dueDate, dueTime, rem
       if (!isNotificationSupported() || Notification.permission !== 'granted') return;
       const due = parseDueDateTime(dueDate, dueTime);
       if (!due || isNaN(due.getTime())) return;
-      const minutes = Array.isArray(reminderMinutesArray) ? reminderMinutesArray.slice(0, 3) : [];
+      const minutes = Array.isArray(reminderMinutesArray) ? reminderMinutesArray.slice(0, MAX_REMINDERS) : [];
       const ids = [];
       for (let i = 0; i < minutes.length; i++) {
         const reminderMinutes = minutes[i];
@@ -278,7 +414,8 @@ export async function scheduleReminders(TaskID, taskTitle, dueDate, dueTime, rem
         if (ms <= 0) continue;
         const id = setTimeout(() => {
           try {
-            new Notification('Reminder', { body: taskTitle });
+            const name = getTaskName(taskTitle);
+            new Notification('Reminder: ' + name, { body: name + ' — ' + formatDueForNotification(dueDate, dueTime) });
           } catch (_) {}
           playTestBeep();
         }, ms);
@@ -292,35 +429,87 @@ export async function scheduleReminders(TaskID, taskTitle, dueDate, dueTime, rem
   }
   if (!Notifications) return;
   try {
+    const { status } = await Notifications.getPermissionsAsync();
+    if (status !== 'granted') {
+      if (__DEV__) {
+        console.warn(
+          '[DailyDuty] Notifications not scheduled (permission not granted). Save a task after allowing notifications, or enable them in system settings.'
+        );
+      }
+      return;
+    }
+    await ensureAndroidReminderChannelConfigured();
     await cancelReminder(TaskID);
     const due = parseDueDateTime(dueDate, dueTime);
     if (!due || isNaN(due.getTime())) return;
-    const minutes = Array.isArray(reminderMinutesArray) ? reminderMinutesArray.slice(0, 3) : [];
+    const minutes = Array.isArray(reminderMinutesArray) ? reminderMinutesArray.slice(0, MAX_REMINDERS) : [];
+    // Build list of { index, reminderMinutes, triggerDate } for non-zero reminders
+    const toSchedule = [];
     for (let i = 0; i < minutes.length; i++) {
       const reminderMinutes = minutes[i];
       if (reminderMinutes === 0) continue; // None
       const offsetMs = reminderMinutes === -1 ? 0 : reminderMinutes * 60 * 1000; // -1 = at due time
-      const triggerDate = new Date(due.getTime() - offsetMs);
-      if (triggerDate.getTime() <= Date.now()) continue;
+      let triggerDate = new Date(due.getTime() - offsetMs);
+      const now = Date.now();
+      // If trigger is in the past: skip unless within last 1 min (fire "late" in 3 sec so user gets something)
+      if (triggerDate.getTime() <= now) {
+        if (triggerDate.getTime() >= now - 60 * 1000) {
+          triggerDate = new Date(now + 3000);
+        } else {
+          continue;
+        }
+      }
+      toSchedule.push({ index: i, reminderMinutes, triggerDate });
+    }
+    // Schedule in chronological order (earliest first) so the soonest alarm is registered first;
+    // on Android this can help the first reminder fire reliably when app is in background.
+    toSchedule.sort((a, b) => a.triggerDate.getTime() - b.triggerDate.getTime());
+    const displayName = getTaskName(taskTitle);
+    const scheduledIdentifiers = [];
+    for (const { index: i, triggerDate } of toSchedule) {
       const identifier = `todo-${TaskID}-${i + 1}`;
-      await Notifications.scheduleNotificationAsync({
-        identifier,
-        content: {
-          title: 'Reminder',
-          body: taskTitle,
-          data: { TaskID, taskTitle },
-          sound: true,
-          ...(Platform.OS === 'android' && {
-            channelId: REMINDER_CHANNEL_ID,
-            vibrate: [0, 250, 250, 250],
-            priority: Notifications.AndroidNotificationPriority?.MAX ?? 'max',
-          }),
-        },
-        trigger: {
-          type: 'date',
-          date: triggerDate,
-        },
-      });
+      const triggerType = Notifications.SchedulableTriggerInputTypes?.DATE ?? 'date';
+      try {
+        await Notifications.scheduleNotificationAsync({
+          identifier,
+          content: {
+            title: 'Reminder: ' + displayName,
+            body: `${displayName} — ${formatDueForNotification(dueDate, dueTime)}`,
+            data: { TaskID, taskTitle: displayName },
+            sound: Platform.OS === 'android' ? 'default' : true,
+            ...(Platform.OS === 'android' && {
+              channelId: REMINDER_CHANNEL_ID,
+              color: '#C62828',
+              vibrate: [0, 400, 200, 400, 200, 400],
+              priority: Notifications.AndroidNotificationPriority?.MAX ?? 'max',
+            }),
+          },
+          trigger: {
+            type: triggerType,
+            date: triggerDate,
+            ...(Platform.OS === 'android' && { channelId: REMINDER_CHANNEL_ID }),
+          },
+        });
+        scheduledIdentifiers.push(identifier);
+      } catch (schedErr) {
+        console.warn('[DailyDuty] scheduleNotificationAsync failed:', identifier, schedErr?.message || schedErr);
+      }
+    }
+    if (__DEV__ && scheduledIdentifiers.length > 0 && typeof Notifications.getAllScheduledNotificationsAsync === 'function') {
+      try {
+        const all = await Notifications.getAllScheduledNotificationsAsync();
+        const idSet = new Set(all.map((r) => r.request?.identifier).filter(Boolean));
+        for (const id of scheduledIdentifiers) {
+          if (!idSet.has(id)) {
+            console.warn('[DailyDuty] Notification not in system schedule after request:', id);
+          }
+        }
+      } catch (e) {
+        console.warn('[DailyDuty] getAllScheduledNotificationsAsync:', e?.message || e);
+      }
+    }
+    if (Platform.OS === 'android' && toSchedule.length > 0) {
+      promptBackgroundReminderSettingsIfNeeded();
     }
   } catch (e) {
     console.warn('Schedule reminders error:', e);
@@ -337,18 +526,16 @@ export async function scheduleRemindersForTodoList(todos) {
     if (todo.Completed === 1) continue;
     const dueDate = todo.DueDate ?? todo.Date ?? null;
     const dueTime = todo.DueTime ?? todo.Time ?? null;
-    const r1 = todo.ReminderMinutes ?? 0;
-    const r2 = todo.Reminder2Minutes ?? 0;
-    const r3 = todo.Reminder3Minutes ?? 0;
-    if (!dueDate || (r1 === 0 && r2 === 0 && r3 === 0)) continue;
+    const minutes = reminderMinutesArrayFromTodo(todo);
+    if (!dueDate || minutes.length === 0) continue;
     try {
-      await scheduleReminders(todo.TaskID, todo.Task ?? '', dueDate, dueTime, [r1, r2, r3]);
+      await scheduleReminders(todo.TaskID, getTaskName(todo), dueDate, dueTime, minutes);
     } catch (_) {}
   }
 }
 
 /**
- * Cancel all scheduled reminders for a task (up to 3).
+ * Cancel all scheduled reminders for a task (up to MAX_REMINDERS slots).
  */
 export async function cancelReminder(TaskID) {
   if (Platform.OS === 'web') {
@@ -361,7 +548,7 @@ export async function cancelReminder(TaskID) {
   }
   if (!Notifications) return;
   try {
-    for (let i = 1; i <= 3; i++) {
+    for (let i = 1; i <= MAX_REMINDERS; i++) {
       await Notifications.cancelScheduledNotificationAsync(`todo-${TaskID}-${i}`);
     }
   } catch (_) {}

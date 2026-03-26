@@ -1,9 +1,13 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, Platform, StyleSheet } from 'react-native';
+import React, { useEffect, useState, useRef } from 'react';
+import { View, Text, Platform, StyleSheet, TouchableOpacity } from 'react-native';
+import * as SplashScreen from 'expo-splash-screen';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { StatusBar } from 'expo-status-bar';
 import ErrorBoundary from './components/ErrorBoundary';
+import { colors, spacing } from './theme';
+
+SplashScreen.preventAutoHideAsync();
 import { SettingsProvider } from './contexts/SettingsContext';
 import { initDatabase, getAllTodos } from './services/database';
 import { startForegroundReminderChecker } from './services/notifications';
@@ -13,35 +17,53 @@ import TodoDetailScreen from './screens/TodoDetailScreen';
 const Stack = createNativeStackNavigator();
 
 export default function App() {
-  const [dbInitialized, setDbInitialized] = useState(false);
+  const [initState, setInitState] = useState('loading'); // 'loading' | 'ready' | 'error'
+  const stopCheckerRef = useRef(() => {});
+
+  const tryInit = async () => {
+    try {
+      setInitState('loading');
+      await initDatabase();
+      stopCheckerRef.current = startForegroundReminderChecker(() => getAllTodos());
+      setInitState('ready');
+    } catch (error) {
+      console.error('Failed to initialize database:', error);
+      setInitState('error');
+    }
+  };
 
   useEffect(() => {
-    let stopForegroundChecker = () => {};
-    const initializeApp = async () => {
-      try {
-        console.log('Initializing database...');
-        await initDatabase();
-        console.log('Database initialized, setting state...');
-      } catch (error) {
-        console.error('Failed to initialize database:', error);
-        console.error('Error details:', error.message || error);
-        // Continue anyway - database might still work or we'll handle errors in components
-      } finally {
-        setDbInitialized(true);
-        stopForegroundChecker = startForegroundReminderChecker(() => getAllTodos());
-      }
+    tryInit();
+    const t = setTimeout(() => {
+      setInitState(prev => (prev === 'loading' ? 'error' : prev));
+    }, 12000);
+    const hideSplash = () => {
+      SplashScreen.hideAsync().catch(() => {});
     };
-
-    initializeApp();
+    const splashT = setTimeout(hideSplash, 100);
     return () => {
-      stopForegroundChecker();
+      clearTimeout(t);
+      clearTimeout(splashT);
+      stopCheckerRef.current();
     };
   }, []);
 
-  if (!dbInitialized) {
+  if (initState === 'loading') {
     return (
-      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#fff' }}>
-        <Text>Loading...</Text>
+      <View style={styles.loadingRoot}>
+        <Text style={styles.loadingText}>Loading...</Text>
+      </View>
+    );
+  }
+
+  if (initState === 'error') {
+    return (
+      <View style={styles.errorRoot}>
+        <Text style={styles.errorTitle}>Database could not be loaded.</Text>
+        <Text style={styles.errorSubtext}>Initialize the database yourself if needed, then tap Retry.</Text>
+        <TouchableOpacity onPress={tryInit} style={styles.retryButton} activeOpacity={0.8}>
+          <Text style={styles.retryButtonText}>Retry</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -55,11 +77,11 @@ export default function App() {
           initialRouteName="TodoList"
           screenOptions={{
             headerStyle: {
-              backgroundColor: '#6200ee',
+              backgroundColor: colors.primary,
             },
             headerTintColor: '#fff',
             headerTitleStyle: {
-              fontWeight: 'bold',
+              fontWeight: '700',
             },
           }}
         >
@@ -90,10 +112,59 @@ export default function App() {
     );
   }
 
-  return appContent;
+  return (
+    <View style={styles.appRoot}>
+      {appContent}
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
+  loadingRoot: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: colors.background,
+  },
+  loadingText: {
+    fontSize: 18,
+    color: colors.text,
+  },
+  errorRoot: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: colors.background,
+    padding: spacing.xxl,
+  },
+  errorTitle: {
+    textAlign: 'center',
+    color: colors.text,
+    marginBottom: spacing.sm,
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  errorSubtext: {
+    textAlign: 'center',
+    color: colors.textSecondary,
+    marginBottom: spacing.lg,
+    paddingHorizontal: spacing.lg,
+  },
+  appRoot: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  retryButton: {
+    backgroundColor: colors.primary,
+    paddingHorizontal: spacing.xxl,
+    paddingVertical: spacing.md,
+    borderRadius: 8,
+  },
+  retryButtonText: {
+    color: colors.surface,
+    fontSize: 16,
+    fontWeight: '600',
+  },
   webWrapper: {
     flex: 1,
     alignItems: 'center',
@@ -105,7 +176,7 @@ const styles = StyleSheet.create({
     width: '100%',
     maxWidth: 390,
     minHeight: '100vh',
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.4,

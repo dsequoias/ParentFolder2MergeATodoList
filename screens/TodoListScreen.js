@@ -15,6 +15,7 @@ import { getAllTodos, deleteTodo, toggleTodoCompletion } from '../services/datab
 import { cancelReminder, scheduleRemindersForTodoList } from '../services/notifications';
 import { useSettings } from '../contexts/SettingsContext';
 import MenuModal from '../components/MenuModal';
+import { colors, spacing, radius } from '../theme';
 
 const FILTER_ALL = 'all';
 const FILTER_ACTIVE = 'active';
@@ -211,7 +212,7 @@ export default function TodoListScreen({ navigation }) {
         </TouchableOpacity>
       </View>
 
-      <MenuModal visible={menuVisible} onClose={() => setMenuVisible(false)} />
+      <MenuModal visible={menuVisible} onClose={() => setMenuVisible(false)} onReset={loadTodos} />
 
       {/* Filters */}
       <View style={styles.filters}>
@@ -266,28 +267,28 @@ export default function TodoListScreen({ navigation }) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#e8e8e8',
+    backgroundColor: colors.background,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingBottom: 16,
-    backgroundColor: '#fff',
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#e0e0e0',
+    paddingHorizontal: spacing.xl,
+    paddingBottom: spacing.lg,
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderLight,
   },
   menuButton: {
     width: 44,
     height: 44,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 4,
+    marginRight: spacing.xs,
   },
   menuButtonText: {
-    fontSize: 24,
-    color: '#333',
+    fontSize: 22,
+    color: colors.text,
     fontWeight: '600',
   },
   headerLeft: {
@@ -295,103 +296,103 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   headerTitle: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#333',
+    fontSize: 24,
+    fontWeight: '700',
+    color: colors.text,
   },
   headerSummary: {
     fontSize: 14,
-    color: '#888',
-    marginTop: 4,
+    color: colors.textMuted,
+    marginTop: 2,
   },
   addButton: {
     width: 48,
     height: 48,
-    borderRadius: 24,
-    backgroundColor: '#6200ee',
+    borderRadius: radius.lg,
+    backgroundColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
   },
   addButtonText: {
-    color: '#fff',
-    fontSize: 28,
-    fontWeight: '300',
-    lineHeight: 32,
+    color: colors.surface,
+    fontSize: 26,
+    fontWeight: '400',
+    lineHeight: 30,
   },
   filters: {
     flexDirection: 'row',
-    backgroundColor: '#fff',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    ...(Platform.OS === 'web' ? {} : { gap: 8 }),
+    backgroundColor: colors.surface,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    ...(Platform.OS === 'web' ? {} : { gap: spacing.sm }),
   },
   filterBtn: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 20,
-    backgroundColor: 'transparent',
-    marginHorizontal: 4,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.md,
+    backgroundColor: colors.backgroundAlt,
+    marginHorizontal: spacing.xs,
   },
   filterBtnActive: {
-    backgroundColor: '#e8e0f0',
+    backgroundColor: colors.primaryLight,
     borderWidth: 1,
-    borderColor: '#9e8fb8',
+    borderColor: colors.primary,
   },
   filterIcon: {
-    fontSize: 16,
-    marginRight: 6,
-    color: '#666',
+    fontSize: 14,
+    marginRight: 4,
+    color: colors.textMuted,
   },
   filterLabel: {
-    fontSize: 15,
-    color: '#666',
+    fontSize: 14,
+    color: colors.textSecondary,
   },
   filterLabelActive: {
-    color: '#333',
+    color: colors.primaryDark,
     fontWeight: '600',
   },
   listContainer: {
-    padding: 12,
-    paddingBottom: 24,
+    padding: spacing.md,
+    paddingBottom: spacing.xxl,
   },
   card: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    marginBottom: 10,
-    padding: 14,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    marginBottom: spacing.md,
+    padding: spacing.lg,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.08,
-    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
     elevation: 2,
   },
   cardCompleted: {
-    opacity: 0.85,
-    backgroundColor: '#f5f0fa',
+    opacity: 0.92,
+    backgroundColor: colors.primaryLight,
   },
   checkbox: {
-    marginRight: 12,
+    marginRight: spacing.md,
   },
   checkboxCircle: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
     borderWidth: 2,
-    borderColor: '#6200ee',
+    borderColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
   },
   checkboxChecked: {
-    backgroundColor: '#6200ee',
+    backgroundColor: colors.primary,
   },
   checkmark: {
-    color: '#fff',
+    color: colors.surface,
     fontSize: 14,
     fontWeight: 'bold',
   },
@@ -402,30 +403,30 @@ const styles = StyleSheet.create({
   taskTitle: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#333',
+    color: colors.text,
     marginBottom: 4,
   },
   taskTitleDone: {
     textDecorationLine: 'line-through',
-    color: '#666',
+    color: colors.textMuted,
   },
   taskNotes: {
     fontSize: 13,
-    color: '#888',
-    marginBottom: 8,
+    color: colors.textMuted,
+    marginBottom: spacing.sm,
   },
   badgesRow: {
     flexDirection: 'row',
-    ...(Platform.OS === 'web' ? {} : { gap: 8 }),
+    ...(Platform.OS === 'web' ? {} : { gap: spacing.sm }),
   },
   badge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#e8e0f0',
+    backgroundColor: colors.backgroundAlt,
     paddingVertical: 4,
-    paddingHorizontal: 8,
-    borderRadius: 12,
-    marginRight: 8,
+    paddingHorizontal: spacing.sm,
+    borderRadius: radius.sm,
+    marginRight: spacing.sm,
   },
   badgeIcon: {
     fontSize: 12,
@@ -433,18 +434,18 @@ const styles = StyleSheet.create({
   },
   badgeText: {
     fontSize: 12,
-    color: '#555',
+    color: colors.textSecondary,
   },
   cardActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginLeft: 8,
+    marginLeft: spacing.sm,
   },
   actionBtn: {
-    padding: 8,
+    padding: spacing.sm,
   },
   actionIcon: {
-    fontSize: 18,
+    fontSize: 20,
   },
   emptyContainer: {
     flex: 1,
@@ -454,11 +455,11 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 18,
-    color: '#999',
-    marginBottom: 8,
+    color: colors.textMuted,
+    marginBottom: spacing.sm,
   },
   emptySubtext: {
     fontSize: 14,
-    color: '#bbb',
+    color: colors.textMuted,
   },
 });

@@ -26,15 +26,25 @@
       "adaptiveIcon": {
         "foregroundImage": "./assets/ddicon.png",
         "backgroundColor": "#FFFFFF"
-      }
+      },
+      "permissions": [
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.SCHEDULE_EXACT_ALARM",
+        "com.android.alarm.permission.SET_ALARM"
+      ]
     },
     "plugins": [
       [
         "expo-notifications",
         {
-          "defaultChannel": "todo-reminders"
+          "defaultChannel": "todo-alarm-v1"
         }
-      ]
+      ],
+      "expo-audio",
+      "./plugins/withSetAlarmPermission.js",
+      "expo-asset"
     ],
     "web": {
       "favicon": "./assets/ddicon.png",
@@ -42,8 +52,9 @@
     },
     "extra": {
       "eas": {
-        "projectId": "320eade3-887c-473a-afa1-47404ce4a9e9"
+        "projectId": "b721e409-a785-49d3-be8a-426d7f78c146"
       }
-    }
+    },
+    "owner": "dsequoias"
   }
 }

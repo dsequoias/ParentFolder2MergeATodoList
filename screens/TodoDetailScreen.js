@@ -8,20 +8,54 @@ import {
   ScrollView,
   Alert,
   Platform,
+  Modal,
+  Pressable,
+  AppState,
 } from 'react-native';
 import { getTodoById, insertTodo, updateTodo } from '../services/database';
+import { MAX_REMINDERS_PER_TASK } from '../constants/reminders.js';
+import {
+  reminderMinutesArrayFromTodo,
+  legacyReminderColumnsFromArray,
+  REMINDER_AT_DUE_TIME,
+} from '../services/reminderUtils.js';
 import { isNotificationSupported, requestReminderPermissions, scheduleReminders, cancelReminder, scheduleTestNotification } from '../services/notifications';
+import { colors, spacing, radius } from '../theme';
 
-const REMINDER_OPTIONS = [
-  { value: 0, label: 'None' },
-  { value: -1, label: 'At due time' },
-  { value: 5, label: '5 minutes before' },
-  { value: 15, label: '15 minutes before' },
-  { value: 30, label: '30 minutes before' },
-  { value: 60, label: '1 hour before' },
-  { value: 120, label: '2 hours before' },
-  { value: 1440, label: '1 day before' },
+let IntentLauncher = null;
+if (Platform.OS === 'android') {
+  try {
+    IntentLauncher = require('expo-intent-launcher');
+  } catch (_) {}
+}
+
+const REMINDER_UNITS = [
+  { key: 'minutes', label: 'Minutes' },
+  { key: 'hours', label: 'Hours' },
+  { key: 'days', label: 'Days' },
 ];
+function minutesToDisplay(min) {
+  if (min == null || min <= 0) return null;
+  if (min % 1440 === 0) return { value: min / 1440, unit: 'days' };
+  if (min % 60 === 0) return { value: min / 60, unit: 'hours' };
+  return { value: min, unit: 'minutes' };
+}
+
+function displayToMinutes(value, unit) {
+  const n = parseInt(value, 10);
+  if (isNaN(n) || n <= 0) return 0;
+  if (unit === 'days') return n * 1440;
+  if (unit === 'hours') return n * 60;
+  return n;
+}
+
+function formatReminderLabel(item) {
+  const v = item.value;
+  const u = item.unit;
+  const singular = u === 'days' ? 'day' : u === 'hours' ? 'hour' : 'min';
+  const plural = u === 'days' ? 'days' : u === 'hours' ? 'hours' : 'mins';
+  return `${v} ${v === 1 ? singular : plural} before`;
+}
 
 // Conditionally import DateTimePicker (not available on web)
 let DateTimePicker = null;
@@ -62,6 +96,9 @@ export default function TodoDetailScreen({ route, navigation }) {
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showTimePicker, setShowTimePicker] = useState(false);
   const webDateInputRef = useRef(null);
+  /** Queue of { hour, minutes, message } for Clock app; next is sent when app returns to foreground. */
+  const pendingClockAlarmsRef = useRef([]);
+  const pendingClockTimeoutRef = useRef(null);
   const [dateInputStr, setDateInputStr] = useState(() => {
     const d = new Date();
     const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -69,15 +106,132 @@ export default function TodoDetailScreen({ route, navigation }) {
     const yy = String(d.getFullYear()).slice(2);
     return `${m}/${day}/${yy}`;
   });
-  const [reminder1, setReminder1] = useState(0);
-  const [reminder2, setReminder2] = useState(0);
-  const [reminder3, setReminder3] = useState(0);
+  // Reminders: list of { value, unit } (max MAX_REMINDERS_PER_TASK). Input row: number + unit dropdown + add.
+  const [reminderList, setReminderList] = useState([]);
+  const [reminderInputValue, setReminderInputValue] = useState('');
+  const [reminderInputUnit, setReminderInputUnit] = useState('minutes');
+  const [reminderUnitDropdownOpen, setReminderUnitDropdownOpen] = useState(false);
+  /** Parse due date (YYYY-MM-DD) and time (HH:MM or HH:MM:SS) into a Date (local time). */
+  const parseDueToDate = (dueDate, dueTime) => {
+    if (!dueDate) return null;
+    const parts = String(dueDate).split(/[-/]/).map((n) => parseInt(n, 10));
+    if (parts.length < 3) return null;
+    let y = parts[0],
+      m = parts[1],
+      d = parts[2];
+    if (parts[0] <= 31 && parts[2] > 31) {
+      m = parts[0];
+      d = parts[1];
+      y = parts[2];
+      if (y < 100) y += 2000;
+    }
+    const timeParts = String(dueTime || '0:0').split(':').map((n) => parseInt(n, 10));
+    const h = timeParts[0] ?? 0;
+    const min = timeParts[1] ?? 0;
+    const s = timeParts[2] ?? 0;
+    const date = new Date(y, m - 1, d, h, min, s);
+    return isNaN(date.getTime()) ? null : date;
+  };
+
+  /**
+   * Send first reminder to Clock app and queue the rest. When the user returns from Clock,
+   * the next alarm is sent automatically (see AppState effect).
+   */
+  const addAlarmsToClockAppForReminders = (dueDate, dueTime, reminderMinutesArray, taskName) => {
+    if (Platform.OS !== 'android' || !IntentLauncher?.startActivityAsync) return;
+    const due = parseDueToDate(dueDate, dueTime);
+    if (!due || !Array.isArray(reminderMinutesArray)) return;
+    const message = (taskName && taskName.trim()) || 'Task';
+    const baseMessage = message + ' (Daily Duty)';
+    const seen = new Set();
+    const alarms = [];
+    for (let i = 0; i < reminderMinutesArray.length; i++) {
+      const reminderMinutes = reminderMinutesArray[i];
+      let alarmAt;
+      let msgSuffix;
+      if (reminderMinutes === REMINDER_AT_DUE_TIME) {
+        alarmAt = new Date(due.getTime());
+        msgSuffix = ' — at due time';
+      } else {
+        if (reminderMinutes == null || reminderMinutes <= 0) continue;
+        alarmAt = new Date(due.getTime() - reminderMinutes * 60 * 1000);
+        msgSuffix = reminderMinutes === 1 ? ' — 1 min before' : ` — ${reminderMinutes} min before`;
+      }
+      const hour = alarmAt.getHours();
+      const minutes = alarmAt.getMinutes();
+      const key = `${hour}:${minutes}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      alarms.push({ hour, minutes, message: baseMessage + msgSuffix });
+    }
+    if (alarms.length === 0) return;
+    const [first, ...rest] = alarms;
+    try {
+      IntentLauncher.startActivityAsync('android.intent.action.SET_ALARM', {
+        extra: {
+          'android.intent.extra.alarm.HOUR': first.hour,
+          'android.intent.extra.alarm.MINUTES': first.minutes,
+          'android.intent.extra.alarm.MESSAGE': first.message,
+        },
+      }).catch(() => {});
+    } catch (_) {}
+    pendingClockAlarmsRef.current = rest;
+  };
+
+  /** Open Clock app to set alarm(s): reminder times if any, otherwise due time (Android). One tap fires all reminder intents. */
+  const openAddToClockApp = async () => {
+    if (Platform.OS !== 'android' || !IntentLauncher?.startActivityAsync) return;
+    const dueDate = getDateToSave();
+    const dueTime = getTimeToSave();
+    if (!dueDate || !dueTime) {
+      Alert.alert('Set date and time', 'Set the task due date and time first, then tap Add to Clock app.');
+      return;
+    }
+    let minutesArray = reminderList.map((item) => displayToMinutes(item.value, item.unit)).filter((m) => m > 0);
+    if (minutesArray.length === 0) {
+      minutesArray = [REMINDER_AT_DUE_TIME];
+    }
+    addAlarmsToClockAppForReminders(dueDate, dueTime, minutesArray, task.trim());
+  };
 
   useEffect(() => {
     if (todoId) {
       loadTodo();
     }
   }, [todoId]);
+
+  // When returning from Clock app, send the next queued alarm so all reminders get added.
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !IntentLauncher?.startActivityAsync) return;
+    let prevState = AppState.currentState;
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (prevState !== 'active' && nextState === 'active') {
+        const pending = pendingClockAlarmsRef.current;
+        if (pending.length > 0) {
+          const [next, ...rest] = pending;
+          pendingClockAlarmsRef.current = rest;
+          if (pendingClockTimeoutRef.current) clearTimeout(pendingClockTimeoutRef.current);
+          pendingClockTimeoutRef.current = setTimeout(() => {
+            pendingClockTimeoutRef.current = null;
+            try {
+              IntentLauncher.startActivityAsync('android.intent.action.SET_ALARM', {
+                extra: {
+                  'android.intent.extra.alarm.HOUR': next.hour,
+                  'android.intent.extra.alarm.MINUTES': next.minutes,
+                  'android.intent.extra.alarm.MESSAGE': next.message,
+                },
+              }).catch(() => {});
+            } catch (_) {}
+          }, 400);
+        }
+      }
+      prevState = nextState;
+    });
+    return () => {
+      sub.remove();
+      if (pendingClockTimeoutRef.current) clearTimeout(pendingClockTimeoutRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     const parsed = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -139,9 +293,9 @@ export default function TodoDetailScreen({ route, navigation }) {
           setTime(t);
           setTimeStr(formatTimeForDisplay(t));
         }
-        setReminder1(todo.ReminderMinutes ?? 0);
-        setReminder2(todo.Reminder2Minutes ?? 0);
-        setReminder3(todo.Reminder3Minutes ?? 0);
+        const mins = reminderMinutesArrayFromTodo(todo);
+        const list = mins.map((m) => minutesToDisplay(m)).filter(Boolean);
+        setReminderList(list);
       }
     } catch (error) {
       Alert.alert('Error', 'Failed to load todo');
@@ -196,6 +350,14 @@ export default function TodoDetailScreen({ route, navigation }) {
     try {
       const dueDate = getDateToSave();
       const dueTime = getTimeToSave();
+      let minutesArray = reminderList
+        .map((item) => displayToMinutes(item.value, item.unit))
+        .filter((m) => m > 0)
+        .slice(0, MAX_REMINDERS_PER_TASK);
+      if (minutesArray.length === 0 && dueDate && dueTime) {
+        minutesArray = [REMINDER_AT_DUE_TIME];
+      }
+      const reminderFields = legacyReminderColumnsFromArray(minutesArray);
       const todoData = {
         Task: task.trim(),
         DueDate: dueDate,
@@ -203,25 +365,27 @@ export default function TodoDetailScreen({ route, navigation }) {
         Completed: completed ? 1 : 0,
         Notes: notes.trim() || null,
         CompletDateTime: completed ? new Date().toISOString().slice(0, 19).replace('T', ' ') : null,
-        ReminderMinutes: reminder1,
-        Reminder2Minutes: reminder2,
-        Reminder3Minutes: reminder3,
+        ...reminderFields,
       };
 
       let savedTaskId = todoId;
+      const hasReminders = minutesArray.length > 0;
       if (todoId) {
         await updateTodo(todoId, todoData);
-        Alert.alert('Success', 'Todo updated successfully');
+        Alert.alert('Success', hasReminders && Platform.OS === 'android'
+          ? 'Todo updated. Reminders set. If they don\'t fire when the app is closed, use Settings → Alarms & reminders and Battery.'
+          : 'Todo updated successfully');
       } else {
         savedTaskId = await insertTodo(todoData);
-        Alert.alert('Success', 'Todo created successfully');
+        Alert.alert('Success', hasReminders && Platform.OS === 'android'
+          ? 'Todo created. Reminders set. If they don\'t fire when the app is closed, use Settings → Alarms & reminders and Battery.'
+          : 'Todo created successfully');
       }
 
-      const hasReminders = (reminder1 !== 0 || reminder2 !== 0 || reminder3 !== 0);
       if (hasReminders && dueDate && dueTime) {
         const granted = await requestReminderPermissions();
         if (granted) {
-          await scheduleReminders(savedTaskId, task.trim(), dueDate, dueTime, [reminder1, reminder2, reminder3]);
+          await scheduleReminders(savedTaskId, task.trim(), dueDate, dueTime, minutesArray);
         }
       } else {
         await cancelReminder(savedTaskId);
@@ -297,6 +461,26 @@ export default function TodoDetailScreen({ route, navigation }) {
       setShowDatePicker(true);
     }
   };
+
+  const addReminder = () => {
+    const n = parseInt(reminderInputValue.trim(), 10);
+    if (isNaN(n) || n <= 0) {
+      Alert.alert('Invalid', 'Enter a positive number.');
+      return;
+    }
+    if (reminderList.length >= MAX_REMINDERS_PER_TASK) {
+      Alert.alert('Limit', `You can add up to ${MAX_REMINDERS_PER_TASK} reminders.`);
+      return;
+    }
+    setReminderList((prev) => [...prev, { value: n, unit: reminderInputUnit }]);
+    setReminderInputValue('');
+  };
+
+  const removeReminder = (index) => {
+    setReminderList((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const currentUnitLabel = REMINDER_UNITS.find((u) => u.key === reminderInputUnit)?.label ?? 'Minutes';
 
   return (
     <View style={styles.container}>
@@ -439,10 +623,75 @@ export default function TodoDetailScreen({ route, navigation }) {
           <Text style={styles.charCount}>{notes.length}/70</Text>
         </View>
 
-        {/* Reminders: 3 slots */}
-        <View style={styles.field}>
-          <Text style={styles.label}>Reminders</Text>
-          <Text style={styles.reminderHint}>Choose up to 3 (e.g. 1 day, 2 hours, 30 min)</Text>
+        {/* Reminders: bell + title, number input, unit dropdown, +, list */}
+        <View style={styles.section}>
+          <View style={styles.reminderSectionHeader}>
+            <Text style={styles.reminderBell}>🔔</Text>
+            <View style={styles.reminderTitleBlock}>
+              <Text style={styles.reminderSectionTitle}>Reminders</Text>
+              <Text style={styles.reminderLimitHint}>
+                {reminderList.length} of {MAX_REMINDERS_PER_TASK} — tap + to add earlier reminders. If you add none, you
+                still get an alarm at the due date and time.
+              </Text>
+            </View>
+          </View>
+          <View style={styles.reminderInputRow}>
+            <TextInput
+              style={styles.reminderNumberInput}
+              value={reminderInputValue}
+              onChangeText={setReminderInputValue}
+              placeholder="0"
+              placeholderTextColor={colors.textMuted}
+              keyboardType="number-pad"
+              maxLength={4}
+            />
+            <TouchableOpacity
+              style={styles.reminderUnitButton}
+              onPress={() => setReminderUnitDropdownOpen(true)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.reminderUnitButtonText}>{currentUnitLabel}</Text>
+              <Text style={styles.reminderUnitChevron}>▼</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.reminderAddButton}
+              onPress={addReminder}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.reminderAddButtonText}>+</Text>
+            </TouchableOpacity>
+          </View>
+          {reminderList.length > 0 && (
+            <View style={styles.reminderList}>
+              {reminderList.map((item, index) => (
+                <View key={index} style={styles.reminderListItem}>
+                  <Text style={styles.reminderListItemText}>{formatReminderLabel(item)}</Text>
+                  <TouchableOpacity
+                    style={styles.reminderListRemove}
+                    onPress={() => removeReminder(index)}
+                    hitSlop={8}
+                  >
+                    <Text style={styles.reminderListRemoveText}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+              ))}
+            </View>
+          )}
+          {Platform.OS === 'android' && reminderList.length > 0 && (
+            <Text style={styles.reminderHint}>
+              Tip: Use the Home button instead of closing the app from recents so reminders can fire when the app is in the background.
+            </Text>
+          )}
+          {Platform.OS === 'android' && (
+            <TouchableOpacity style={styles.phoneAlarmButton} onPress={openAddToClockApp} activeOpacity={0.8}>
+              <Text style={styles.phoneAlarmButtonText}>Add to Clock app</Text>
+              <Text style={styles.phoneAlarmButtonSubtext}>
+                {reminderList.length > 0
+                  ? 'Set alarms at your reminder times (works when screen is off)'
+                  : 'Set alarm at due time (works when screen is off)'}
+              </Text>
+            </TouchableOpacity>
+          )}
           {Platform.OS === 'web' && (
             <TouchableOpacity
               style={styles.testReminderButton}
@@ -476,32 +725,33 @@ export default function TodoDetailScreen({ route, navigation }) {
               <Text style={styles.testReminderButtonText}>Test reminder (3 sec)</Text>
             </TouchableOpacity>
           )}
-          {[
-            { label: '1st reminder', value: reminder1, setValue: setReminder1 },
-            { label: '2nd reminder', value: reminder2, setValue: setReminder2 },
-            { label: '3rd reminder', value: reminder3, setValue: setReminder3 },
-          ].map(({ label, value, setValue }) => (
-            <View key={label} style={styles.reminderRow}>
-              <Text style={styles.reminderRowLabel}>{label}</Text>
-              <View style={styles.reminderOptions}>
-                {REMINDER_OPTIONS.map((opt) => (
+          <Modal
+            visible={reminderUnitDropdownOpen}
+            transparent
+            animationType="fade"
+            onRequestClose={() => setReminderUnitDropdownOpen(false)}
+          >
+            <Pressable style={styles.unitDropdownOverlay} onPress={() => setReminderUnitDropdownOpen(false)}>
+              <View style={styles.unitDropdownBox}>
+                {REMINDER_UNITS.map((u) => (
                   <TouchableOpacity
-                    key={opt.value}
-                    style={[styles.reminderOption, value === opt.value && styles.reminderOptionActive]}
-                    onPress={() => setValue(opt.value)}
+                    key={u.key}
+                    style={[styles.unitDropdownOption, reminderInputUnit === u.key && styles.unitDropdownOptionActive]}
+                    onPress={() => {
+                      setReminderInputUnit(u.key);
+                      setReminderUnitDropdownOpen(false);
+                    }}
                     activeOpacity={0.7}
                   >
-                    <Text style={[styles.reminderOptionText, value === opt.value && styles.reminderOptionTextActive]}>
-                      {opt.label}
+                    <Text style={[styles.unitDropdownOptionText, reminderInputUnit === u.key && styles.unitDropdownOptionTextActive]}>
+                      {u.label}
                     </Text>
-                    {value === opt.value && <Text style={styles.reminderCheck}>✓</Text>}
                   </TouchableOpacity>
                 ))}
               </View>
-            </View>
-          ))}
+            </Pressable>
+          </Modal>
         </View>
-
         {/* Completed: only when editing */}
         {!isNewTask && (
           <View style={styles.field}>
@@ -534,38 +784,39 @@ export default function TodoDetailScreen({ route, navigation }) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
+    backgroundColor: colors.background,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#e0e0e0',
+    paddingHorizontal: spacing.xl,
+    paddingVertical: spacing.lg,
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderLight,
   },
   headerTitle: {
     fontSize: 20,
-    fontWeight: 'bold',
-    color: '#333',
+    fontWeight: '700',
+    color: colors.text,
   },
   closeBtn: {
-    padding: 4,
+    padding: spacing.xs,
   },
   closeBtnText: {
     fontSize: 22,
-    color: '#666',
+    color: colors.textSecondary,
   },
   scroll: {
     flex: 1,
   },
   form: {
-    padding: 20,
-    paddingBottom: 32,
+    padding: spacing.xl,
+    paddingBottom: spacing.xxl + spacing.lg,
   },
   field: {
-    marginBottom: 20,
+    marginBottom: spacing.xl,
   },
   fieldHalf: {
     flex: 1,
@@ -573,24 +824,38 @@ const styles = StyleSheet.create({
   },
   row: {
     flexDirection: 'row',
-    marginBottom: 20,
-    gap: 12,
+    marginBottom: spacing.xl,
+    gap: spacing.md,
     alignItems: 'flex-start',
   },
   label: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
-    color: '#333',
-    marginBottom: 6,
+    color: colors.text,
+    marginBottom: spacing.sm,
+  },
+  section: {
+    marginBottom: spacing.xl,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    padding: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: colors.text,
+    marginBottom: spacing.sm,
   },
   input: {
-    backgroundColor: '#fff',
-    borderRadius: 10,
-    padding: 12,
+    backgroundColor: colors.surface,
+    borderRadius: radius.sm,
+    padding: spacing.md,
     fontSize: 16,
     borderWidth: 1,
-    borderColor: '#ddd',
-    color: '#333',
+    borderColor: colors.border,
+    color: colors.text,
   },
   inputFlex: {
     flex: 1,
@@ -598,12 +863,12 @@ const styles = StyleSheet.create({
   dateTimeInputWrap: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 10,
+    backgroundColor: colors.surface,
+    borderRadius: radius.sm,
     borderWidth: 1,
-    borderColor: '#ddd',
-    paddingLeft: 12,
-    paddingRight: 8,
+    borderColor: colors.border,
+    paddingLeft: spacing.md,
+    paddingRight: spacing.sm,
     minHeight: 48,
     maxWidth: '100%',
     overflow: 'hidden',
@@ -615,100 +880,276 @@ const styles = StyleSheet.create({
     paddingVertical: 0,
     paddingHorizontal: 0,
     fontSize: 16,
-    color: '#333',
+    color: colors.text,
     backgroundColor: 'transparent',
     borderWidth: 0,
   },
   inputWithIcon: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 10,
+    backgroundColor: colors.surface,
+    borderRadius: radius.sm,
     borderWidth: 1,
-    borderColor: '#ddd',
-    paddingHorizontal: 12,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
     minHeight: 48,
   },
   calendarIconTouch: {
-    padding: 4,
+    padding: spacing.xs,
   },
   inputIcon: {
     fontSize: 18,
-    marginLeft: 4,
+    marginLeft: spacing.xs,
   },
   dateTimeText: {
     fontSize: 16,
-    color: '#333',
+    color: colors.text,
   },
   placeholder: {
-    color: '#999',
+    color: colors.textMuted,
   },
   textArea: {
     minHeight: 88,
     textAlignVertical: 'top',
-    paddingTop: 12,
+    paddingTop: spacing.md,
   },
   charCount: {
     fontSize: 12,
-    color: '#999',
-    marginTop: 4,
+    color: colors.textMuted,
+    marginTop: spacing.xs,
   },
   reminderHint: {
     fontSize: 13,
-    color: '#666',
-    marginBottom: 10,
+    color: colors.textSecondary,
+    marginBottom: spacing.md,
+  },
+  reminderSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: spacing.lg,
+  },
+  reminderTitleBlock: {
+    flex: 1,
+    minWidth: 0,
+  },
+  reminderSectionTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  reminderLimitHint: {
+    fontSize: 12,
+    color: colors.textMuted,
+    marginTop: spacing.xs,
+  },
+  reminderBell: {
+    fontSize: 22,
+    marginRight: spacing.sm,
+    marginTop: 2,
+  },
+  reminderInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: spacing.md,
+    gap: spacing.sm,
+  },
+  reminderNumberInput: {
+    width: 72,
+    backgroundColor: colors.backgroundAlt,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.md,
+    fontSize: 16,
+    color: colors.text,
+  },
+  reminderUnitButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.backgroundAlt,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.md,
+    minWidth: 100,
+  },
+  reminderUnitButtonText: {
+    fontSize: 15,
+    color: colors.text,
+    flex: 1,
+  },
+  reminderUnitChevron: {
+    fontSize: 10,
+    color: colors.textMuted,
+    marginLeft: 4,
+  },
+  reminderAddButton: {
+    width: 44,
+    height: 44,
+    borderRadius: radius.sm,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  reminderAddButtonText: {
+    fontSize: 24,
+    color: colors.surface,
+    fontWeight: '600',
+    lineHeight: 28,
+  },
+  reminderList: {
+    marginTop: spacing.sm,
+  },
+  reminderListItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#FFF3E0',
+    borderRadius: 20,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    marginBottom: spacing.sm,
+  },
+  reminderListItemText: {
+    fontSize: 15,
+    color: colors.text,
+  },
+  reminderListRemove: {
+    padding: spacing.xs,
+  },
+  reminderListRemoveText: {
+    fontSize: 16,
+    color: colors.textMuted,
+    fontWeight: '600',
+  },
+  phoneAlarmButton: {
+    marginTop: spacing.md,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    backgroundColor: '#E8F5E9',
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: '#C8E6C9',
+  },
+  phoneAlarmButtonText: {
+    fontSize: 15,
+    color: colors.text,
+    fontWeight: '600',
+  },
+  phoneAlarmButtonSubtext: {
+    fontSize: 12,
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  unitDropdownOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  unitDropdownBox: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.sm,
+    padding: spacing.xs,
+    minWidth: 160,
+    ...(Platform.OS === 'web' ? { boxShadow: '0 4px 12px rgba(0,0,0,0.15)' } : { elevation: 4, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 8 }),
+  },
+  unitDropdownOption: {
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+  },
+  unitDropdownOptionActive: {
+    backgroundColor: colors.primaryLight,
+    borderRadius: radius.sm,
+  },
+  unitDropdownOptionText: {
+    fontSize: 16,
+    color: colors.text,
+  },
+  unitDropdownOptionTextActive: {
+    fontWeight: '600',
+    color: colors.primaryDark,
   },
   testReminderButton: {
     alignSelf: 'flex-start',
-    backgroundColor: '#6200ee',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    marginBottom: 12,
+    backgroundColor: colors.primary,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radius.sm,
+    marginBottom: spacing.md,
   },
   testReminderButtonText: {
-    color: '#fff',
+    color: colors.surface,
     fontSize: 14,
     fontWeight: '600',
   },
   reminderRow: {
-    marginBottom: 14,
+    marginBottom: spacing.md,
   },
   reminderRowLabel: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#555',
-    marginBottom: 6,
+    color: colors.textSecondary,
+    marginBottom: spacing.sm,
   },
   reminderOptions: {
-    backgroundColor: '#f5f5f5',
-    borderRadius: 10,
+    backgroundColor: colors.backgroundAlt,
+    borderRadius: radius.sm,
     overflow: 'hidden',
   },
   reminderOption: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#e0e0e0',
+    borderBottomColor: colors.borderLight,
   },
   reminderOptionActive: {
-    backgroundColor: '#e8e0f0',
+    backgroundColor: colors.primaryLight,
   },
   reminderOptionText: {
     fontSize: 15,
-    color: '#333',
+    color: colors.text,
   },
   reminderOptionTextActive: {
     fontWeight: '600',
-    color: '#6200ee',
+    color: colors.primaryDark,
   },
   reminderCheck: {
     fontSize: 16,
-    color: '#6200ee',
+    color: colors.primary,
     fontWeight: 'bold',
+  },
+  phoneAlarmRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: spacing.md,
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  phoneAlarmLabel: {
+    fontSize: 14,
+    color: colors.text,
+    marginRight: spacing.xs,
+  },
+  phoneAlarmButton: {
+    backgroundColor: colors.primary,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radius.sm,
+    alignSelf: 'flex-start',
+  },
+  phoneAlarmButtonText: {
+    color: colors.surface,
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  phoneAlarmButtonDisabled: {
+    opacity: 0.5,
   },
   checkboxContainer: {
     flexDirection: 'row',
@@ -719,54 +1160,54 @@ const styles = StyleSheet.create({
     height: 24,
     borderRadius: 12,
     borderWidth: 2,
-    borderColor: '#6200ee',
+    borderColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 12,
+    marginRight: spacing.md,
   },
   checkboxChecked: {
-    backgroundColor: '#6200ee',
+    backgroundColor: colors.primary,
   },
   checkmark: {
-    color: '#fff',
+    color: colors.surface,
     fontSize: 16,
     fontWeight: 'bold',
   },
   checkboxLabel: {
     fontSize: 16,
-    color: '#333',
+    color: colors.text,
   },
   buttonRow: {
     flexDirection: 'row',
-    marginTop: 8,
-    gap: 12,
+    marginTop: spacing.lg,
+    gap: spacing.md,
   },
   cancelButton: {
     flex: 1,
-    paddingVertical: 14,
-    borderRadius: 10,
+    paddingVertical: spacing.lg,
+    borderRadius: radius.sm,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#fff',
+    backgroundColor: colors.surface,
     borderWidth: 1,
-    borderColor: '#ddd',
+    borderColor: colors.border,
   },
   cancelButtonText: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#555',
+    color: colors.textSecondary,
   },
   primaryButton: {
     flex: 1,
-    paddingVertical: 14,
-    borderRadius: 10,
+    paddingVertical: spacing.lg,
+    borderRadius: radius.sm,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#6200ee',
+    backgroundColor: colors.primary,
   },
   primaryButtonText: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#fff',
+    color: colors.surface,
   },
 });
