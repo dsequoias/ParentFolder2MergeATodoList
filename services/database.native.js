@@ -1,18 +1,29 @@
 import * as SQLite from 'expo-sqlite';
+
 import { TODOS_SEED } from './seedData';
 
 const dbName = 'TodoDB.db';
 let db = null;
+// Singleton guard: if initDatabase() is called concurrently, all callers await the same promise.
+let initPromise = null;
 
-// Initialize TodoDB.db with TodosTB and AuditTB (same schema as your TodoDB.db)
 export const initDatabase = async () => {
+  if (initPromise) return initPromise;
+  initPromise = _initDatabase().catch((err) => {
+    // Reset so a future call can retry after a transient failure.
+    initPromise = null;
+    throw err;
+  });
+  return initPromise;
+};
+
+const _initDatabase = async () => {
   try {
     db = await SQLite.openDatabaseAsync(dbName);
-
-    // Create TodosTB and AuditTB to match TodoDB.db schema
+    await db.execAsync('PRAGMA busy_timeout = 5000;');
+    await db.execAsync('PRAGMA journal_mode = WAL;');
+    await db.execAsync('PRAGMA foreign_keys = ON;');
     await db.execAsync(`
-      PRAGMA foreign_keys = ON;
-
       CREATE TABLE IF NOT EXISTS TodosTB (
         TaskID INTEGER PRIMARY KEY AUTOINCREMENT,
         Task TEXT NOT NULL CHECK(length(Task) <= 40),
@@ -22,9 +33,10 @@ export const initDatabase = async () => {
         Notes TEXT CHECK(length(Notes) <= 70),
         CompletDateTime DATETIME
       );
-      CREATE INDEX IF NOT EXISTS idx_todostb_date ON TodosTB(Date);
-      CREATE INDEX IF NOT EXISTS idx_todostb_completed ON TodosTB(Completed);
-
+    `);
+    await db.execAsync(`CREATE INDEX IF NOT EXISTS idx_todostb_date ON TodosTB(Date);`);
+    await db.execAsync(`CREATE INDEX IF NOT EXISTS idx_todostb_completed ON TodosTB(Completed);`);
+    await db.execAsync(`
       CREATE TABLE IF NOT EXISTS AuditTB (
         AuditID INTEGER PRIMARY KEY AUTOINCREMENT,
         TaskID INTEGER NOT NULL,
@@ -32,11 +44,9 @@ export const initDatabase = async () => {
         Action TEXT NOT NULL CHECK(Action IN ('create', 'update', 'delete')),
         DateTime DATETIME NOT NULL DEFAULT (datetime('now', 'localtime'))
       );
-      CREATE INDEX IF NOT EXISTS idx_audittb_taskid ON AuditTB(TaskID);
-      CREATE INDEX IF NOT EXISTS idx_audittb_datetime ON AuditTB(DateTime);
     `);
-
-    // Create triggers for audit (if not exist - SQLite doesn't have IF NOT EXISTS for triggers, so we ignore errors or use separate exec)
+    await db.execAsync(`CREATE INDEX IF NOT EXISTS idx_audittb_taskid ON AuditTB(TaskID);`);
+    await db.execAsync(`CREATE INDEX IF NOT EXISTS idx_audittb_datetime ON AuditTB(DateTime);`);
     try {
       await db.execAsync(`
         CREATE TRIGGER tr_TodosTB_after_insert
@@ -68,44 +78,43 @@ export const initDatabase = async () => {
       `);
     } catch (_) {}
 
-    try {
-      await db.execAsync('ALTER TABLE TodosTB ADD COLUMN ReminderMinutes INTEGER DEFAULT 0');
-    } catch (_) {}
-    try {
-      await db.execAsync('ALTER TABLE TodosTB ADD COLUMN Reminder2Minutes INTEGER DEFAULT 0');
-    } catch (_) {}
-    try {
-      await db.execAsync('ALTER TABLE TodosTB ADD COLUMN Reminder3Minutes INTEGER DEFAULT 0');
-    } catch (_) {}
-    try {
-      await db.execAsync('ALTER TABLE TodosTB ADD COLUMN RemindersJSON TEXT');
-    } catch (_) {}
+    // Column migrations: swallow "duplicate column" errors only; log anything unexpected in dev.
+    const migrations = [
+      'ALTER TABLE TodosTB ADD COLUMN ReminderMinutes INTEGER DEFAULT 0',
+      'ALTER TABLE TodosTB ADD COLUMN Reminder2Minutes INTEGER DEFAULT 0',
+      'ALTER TABLE TodosTB ADD COLUMN Reminder3Minutes INTEGER DEFAULT 0',
+      'ALTER TABLE TodosTB ADD COLUMN RemindersJSON TEXT',
+    ];
+    for (const sql of migrations) {
+      try {
+        await db.execAsync(sql);
+      } catch (e) {
+        if (__DEV__ && !e?.message?.includes('duplicate column')) {
+          console.warn('Migration warning:', e.message);
+        }
+      }
+    }
 
-    // Seed TodosTB from TodoDB.db data when empty
     const countResult = await db.getFirstAsync('SELECT COUNT(*) as count FROM TodosTB');
     const count = countResult?.count ?? 0;
     if (count === 0 && TODOS_SEED.length > 0) {
-      for (const row of TODOS_SEED) {
-        await db.runAsync(
-          `INSERT INTO TodosTB (Task, "Date", "Time", Completed, Notes, CompletDateTime, ReminderMinutes, Reminder2Minutes, Reminder3Minutes, RemindersJSON) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            row.Task,
-            row.Date,
-            row.Time,
-            row.Completed,
-            row.Notes ?? null,
-            row.CompletDateTime ?? null,
-            row.ReminderMinutes ?? 0,
-            row.Reminder2Minutes ?? 0,
-            row.Reminder3Minutes ?? 0,
-            row.RemindersJSON ?? null,
-          ]
-        );
-      }
-      console.log(`Seeded ${TODOS_SEED.length} todos into TodosTB (TodoDB.db)`);
+      // Wrap seed inserts in a single transaction to avoid repeated lock acquire/release.
+      await db.withTransactionAsync(async () => {
+        for (const row of TODOS_SEED) {
+          await db.runAsync(
+            `INSERT INTO TodosTB (Task, "Date", "Time", Completed, Notes, CompletDateTime, ReminderMinutes, Reminder2Minutes, Reminder3Minutes, RemindersJSON) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              row.Task, row.Date, row.Time, row.Completed,
+              row.Notes ?? null, row.CompletDateTime ?? null,
+              row.ReminderMinutes ?? 0, row.Reminder2Minutes ?? 0,
+              row.Reminder3Minutes ?? 0, row.RemindersJSON ?? null,
+            ]
+          );
+        }
+      });
+      console.log(`Seeded ${TODOS_SEED.length} todos into TodosTB`);
     }
-
-    console.log('TodoDB.db initialized with TodosTB');
+    console.log('TodoDB.db initialized successfully');
     return db;
   } catch (error) {
     console.error('Error initializing database:', error);
@@ -130,38 +139,41 @@ export const getTodoById = async (TaskID) => {
 
 export const insertTodo = async (todo) => {
   const database = getDatabase();
-  const Task = todo.Task;
-  const DueDate = todo.DueDate ?? todo.Date ?? null;
-  const DueTime = todo.DueTime ?? todo.Time ?? null;
-  const Completed = todo.Completed ?? 0;
-  const Notes = todo.Notes ?? null;
-  const CompletDateTime = todo.CompletDateTime ?? null;
-  const ReminderMinutes = todo.ReminderMinutes ?? 0;
-  const Reminder2Minutes = todo.Reminder2Minutes ?? 0;
-  const Reminder3Minutes = todo.Reminder3Minutes ?? 0;
-  const RemindersJSON = todo.RemindersJSON ?? null;
   const result = await database.runAsync(
     `INSERT INTO TodosTB (Task, "Date", "Time", Completed, Notes, CompletDateTime, ReminderMinutes, Reminder2Minutes, Reminder3Minutes, RemindersJSON) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [Task, DueDate, DueTime, Completed, Notes, CompletDateTime, ReminderMinutes, Reminder2Minutes, Reminder3Minutes, RemindersJSON]
+    [
+      todo.Task,
+      todo.DueDate ?? todo.Date ?? null,
+      todo.DueTime ?? todo.Time ?? null,
+      todo.Completed ?? 0,
+      todo.Notes ?? null,
+      todo.CompletDateTime ?? null,
+      todo.ReminderMinutes ?? 0,
+      todo.Reminder2Minutes ?? 0,
+      todo.Reminder3Minutes ?? 0,
+      todo.RemindersJSON ?? null,
+    ]
   );
   return result.lastInsertRowId;
 };
 
 export const updateTodo = async (TaskID, todo) => {
   const database = getDatabase();
-  const Task = todo.Task;
-  const DueDate = todo.DueDate ?? todo.Date ?? null;
-  const DueTime = todo.DueTime ?? todo.Time ?? null;
-  const Completed = todo.Completed ?? 0;
-  const Notes = todo.Notes ?? null;
-  const CompletDateTime = todo.CompletDateTime ?? null;
-  const ReminderMinutes = todo.ReminderMinutes ?? 0;
-  const Reminder2Minutes = todo.Reminder2Minutes ?? 0;
-  const Reminder3Minutes = todo.Reminder3Minutes ?? 0;
-  const RemindersJSON = todo.RemindersJSON ?? null;
   await database.runAsync(
     `UPDATE TodosTB SET Task = ?, "Date" = ?, "Time" = ?, Completed = ?, Notes = ?, CompletDateTime = ?, ReminderMinutes = ?, Reminder2Minutes = ?, Reminder3Minutes = ?, RemindersJSON = ? WHERE TaskID = ?`,
-    [Task, DueDate, DueTime, Completed, Notes, CompletDateTime, ReminderMinutes, Reminder2Minutes, Reminder3Minutes, RemindersJSON, TaskID]
+    [
+      todo.Task,
+      todo.DueDate ?? todo.Date ?? null,
+      todo.DueTime ?? todo.Time ?? null,
+      todo.Completed ?? 0,
+      todo.Notes ?? null,
+      todo.CompletDateTime ?? null,
+      todo.ReminderMinutes ?? 0,
+      todo.Reminder2Minutes ?? 0,
+      todo.Reminder3Minutes ?? 0,
+      todo.RemindersJSON ?? null,
+      TaskID,
+    ]
   );
   return true;
 };
@@ -174,7 +186,9 @@ export const deleteTodo = async (TaskID) => {
 
 export const toggleTodoCompletion = async (TaskID, completed) => {
   const database = getDatabase();
-  const CompletDateTime = completed ? new Date().toISOString().slice(0, 19).replace('T', ' ') : null;
+  const CompletDateTime = completed
+    ? new Date().toISOString().slice(0, 19).replace('T', ' ')
+    : null;
   await database.runAsync(
     'UPDATE TodosTB SET Completed = ?, CompletDateTime = ? WHERE TaskID = ?',
     [completed ? 1 : 0, CompletDateTime, TaskID]
@@ -182,7 +196,6 @@ export const toggleTodoCompletion = async (TaskID, completed) => {
   return true;
 };
 
-/** Clear all data: empty TodosTB and AuditTB, reset IDs. */
 export const resetDatabase = async () => {
   const database = getDatabase();
   await database.execAsync('DELETE FROM TodosTB');

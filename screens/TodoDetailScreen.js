@@ -1,39 +1,33 @@
-import React, { useState, useEffect, useRef } from 'react';
 import {
-  View,
+  Alert,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  StyleSheet,
-  ScrollView,
-  Alert,
-  Platform,
-  Modal,
-  Pressable,
-  AppState,
+  View,
 } from 'react-native';
-import { getTodoById, insertTodo, updateTodo } from '../services/database';
-import { MAX_REMINDERS_PER_TASK } from '../constants/reminders.js';
 import {
-  reminderMinutesArrayFromTodo,
-  legacyReminderColumnsFromArray,
   REMINDER_AT_DUE_TIME,
+  legacyReminderColumnsFromArray,
+  reminderMinutesArrayFromTodo,
 } from '../services/reminderUtils.js';
-import { isNotificationSupported, requestReminderPermissions, scheduleReminders, cancelReminder, scheduleTestNotification } from '../services/notifications';
-import { colors, spacing, radius } from '../theme';
+import React, { useEffect, useRef, useState } from 'react';
+import { cancelReminder, isNotificationSupported, requestReminderPermissions, scheduleReminders, scheduleTestNotification } from '../services/notifications';
+import { colors, radius, spacing } from '../theme';
+import { getTodoById, insertTodo, updateTodo } from '../services/database';
 
-let IntentLauncher = null;
-if (Platform.OS === 'android') {
-  try {
-    IntentLauncher = require('expo-intent-launcher');
-  } catch (_) {}
-}
+import { MAX_REMINDERS_PER_TASK } from '../constants/reminders.js';
 
 const REMINDER_UNITS = [
   { key: 'minutes', label: 'Minutes' },
   { key: 'hours', label: 'Hours' },
   { key: 'days', label: 'Days' },
 ];
+
 function minutesToDisplay(min) {
   if (min == null || min <= 0) return null;
   if (min % 1440 === 0) return { value: min / 1440, unit: 'days' };
@@ -57,7 +51,6 @@ function formatReminderLabel(item) {
   return `${v} ${v === 1 ? singular : plural} before`;
 }
 
-// Conditionally import DateTimePicker (not available on web)
 let DateTimePicker = null;
 if (Platform.OS !== 'web') {
   try {
@@ -67,7 +60,6 @@ if (Platform.OS !== 'web') {
   }
 }
 
-// Format date as YYYY-MM-DD in local timezone (avoid UTC shift)
 const formatDateForDisplay = (date) => {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, '0');
@@ -75,7 +67,6 @@ const formatDateForDisplay = (date) => {
   return `${y}-${m}-${d}`;
 };
 
-// Format time as HH:MM:SS in local timezone
 const formatTimeForDisplay = (date) => {
   const h = String(date.getHours()).padStart(2, '0');
   const m = String(date.getMinutes()).padStart(2, '0');
@@ -88,7 +79,6 @@ export default function TodoDetailScreen({ route, navigation }) {
   const [task, setTask] = useState('');
   const [date, setDate] = useState(new Date());
   const [time, setTime] = useState(new Date());
-  // Web: editable date/time strings so user can type freely
   const [dateStr, setDateStr] = useState(() => formatDateForDisplay(new Date()));
   const [timeStr, setTimeStr] = useState(() => formatTimeForDisplay(new Date()));
   const [notes, setNotes] = useState('');
@@ -96,9 +86,6 @@ export default function TodoDetailScreen({ route, navigation }) {
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showTimePicker, setShowTimePicker] = useState(false);
   const webDateInputRef = useRef(null);
-  /** Queue of { hour, minutes, message } for Clock app; next is sent when app returns to foreground. */
-  const pendingClockAlarmsRef = useRef([]);
-  const pendingClockTimeoutRef = useRef(null);
   const [dateInputStr, setDateInputStr] = useState(() => {
     const d = new Date();
     const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -106,132 +93,16 @@ export default function TodoDetailScreen({ route, navigation }) {
     const yy = String(d.getFullYear()).slice(2);
     return `${m}/${day}/${yy}`;
   });
-  // Reminders: list of { value, unit } (max MAX_REMINDERS_PER_TASK). Input row: number + unit dropdown + add.
   const [reminderList, setReminderList] = useState([]);
   const [reminderInputValue, setReminderInputValue] = useState('');
   const [reminderInputUnit, setReminderInputUnit] = useState('minutes');
   const [reminderUnitDropdownOpen, setReminderUnitDropdownOpen] = useState(false);
-  /** Parse due date (YYYY-MM-DD) and time (HH:MM or HH:MM:SS) into a Date (local time). */
-  const parseDueToDate = (dueDate, dueTime) => {
-    if (!dueDate) return null;
-    const parts = String(dueDate).split(/[-/]/).map((n) => parseInt(n, 10));
-    if (parts.length < 3) return null;
-    let y = parts[0],
-      m = parts[1],
-      d = parts[2];
-    if (parts[0] <= 31 && parts[2] > 31) {
-      m = parts[0];
-      d = parts[1];
-      y = parts[2];
-      if (y < 100) y += 2000;
-    }
-    const timeParts = String(dueTime || '0:0').split(':').map((n) => parseInt(n, 10));
-    const h = timeParts[0] ?? 0;
-    const min = timeParts[1] ?? 0;
-    const s = timeParts[2] ?? 0;
-    const date = new Date(y, m - 1, d, h, min, s);
-    return isNaN(date.getTime()) ? null : date;
-  };
-
-  /**
-   * Send first reminder to Clock app and queue the rest. When the user returns from Clock,
-   * the next alarm is sent automatically (see AppState effect).
-   */
-  const addAlarmsToClockAppForReminders = (dueDate, dueTime, reminderMinutesArray, taskName) => {
-    if (Platform.OS !== 'android' || !IntentLauncher?.startActivityAsync) return;
-    const due = parseDueToDate(dueDate, dueTime);
-    if (!due || !Array.isArray(reminderMinutesArray)) return;
-    const message = (taskName && taskName.trim()) || 'Task';
-    const baseMessage = message + ' (Daily Duty)';
-    const seen = new Set();
-    const alarms = [];
-    for (let i = 0; i < reminderMinutesArray.length; i++) {
-      const reminderMinutes = reminderMinutesArray[i];
-      let alarmAt;
-      let msgSuffix;
-      if (reminderMinutes === REMINDER_AT_DUE_TIME) {
-        alarmAt = new Date(due.getTime());
-        msgSuffix = ' — at due time';
-      } else {
-        if (reminderMinutes == null || reminderMinutes <= 0) continue;
-        alarmAt = new Date(due.getTime() - reminderMinutes * 60 * 1000);
-        msgSuffix = reminderMinutes === 1 ? ' — 1 min before' : ` — ${reminderMinutes} min before`;
-      }
-      const hour = alarmAt.getHours();
-      const minutes = alarmAt.getMinutes();
-      const key = `${hour}:${minutes}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      alarms.push({ hour, minutes, message: baseMessage + msgSuffix });
-    }
-    if (alarms.length === 0) return;
-    const [first, ...rest] = alarms;
-    try {
-      IntentLauncher.startActivityAsync('android.intent.action.SET_ALARM', {
-        extra: {
-          'android.intent.extra.alarm.HOUR': first.hour,
-          'android.intent.extra.alarm.MINUTES': first.minutes,
-          'android.intent.extra.alarm.MESSAGE': first.message,
-        },
-      }).catch(() => {});
-    } catch (_) {}
-    pendingClockAlarmsRef.current = rest;
-  };
-
-  /** Open Clock app to set alarm(s): reminder times if any, otherwise due time (Android). One tap fires all reminder intents. */
-  const openAddToClockApp = async () => {
-    if (Platform.OS !== 'android' || !IntentLauncher?.startActivityAsync) return;
-    const dueDate = getDateToSave();
-    const dueTime = getTimeToSave();
-    if (!dueDate || !dueTime) {
-      Alert.alert('Set date and time', 'Set the task due date and time first, then tap Add to Clock app.');
-      return;
-    }
-    let minutesArray = reminderList.map((item) => displayToMinutes(item.value, item.unit)).filter((m) => m > 0);
-    if (minutesArray.length === 0) {
-      minutesArray = [REMINDER_AT_DUE_TIME];
-    }
-    addAlarmsToClockAppForReminders(dueDate, dueTime, minutesArray, task.trim());
-  };
 
   useEffect(() => {
     if (todoId) {
       loadTodo();
     }
   }, [todoId]);
-
-  // When returning from Clock app, send the next queued alarm so all reminders get added.
-  useEffect(() => {
-    if (Platform.OS !== 'android' || !IntentLauncher?.startActivityAsync) return;
-    let prevState = AppState.currentState;
-    const sub = AppState.addEventListener('change', (nextState) => {
-      if (prevState !== 'active' && nextState === 'active') {
-        const pending = pendingClockAlarmsRef.current;
-        if (pending.length > 0) {
-          const [next, ...rest] = pending;
-          pendingClockAlarmsRef.current = rest;
-          if (pendingClockTimeoutRef.current) clearTimeout(pendingClockTimeoutRef.current);
-          pendingClockTimeoutRef.current = setTimeout(() => {
-            pendingClockTimeoutRef.current = null;
-            try {
-              IntentLauncher.startActivityAsync('android.intent.action.SET_ALARM', {
-                extra: {
-                  'android.intent.extra.alarm.HOUR': next.hour,
-                  'android.intent.extra.alarm.MINUTES': next.minutes,
-                  'android.intent.extra.alarm.MESSAGE': next.message,
-                },
-              }).catch(() => {});
-            } catch (_) {}
-          }, 400);
-        }
-      }
-      prevState = nextState;
-    });
-    return () => {
-      sub.remove();
-      if (pendingClockTimeoutRef.current) clearTimeout(pendingClockTimeoutRef.current);
-    };
-  }, []);
 
   useEffect(() => {
     const parsed = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -243,7 +114,6 @@ export default function TodoDetailScreen({ route, navigation }) {
     }
   }, [dateStr]);
 
-  // Web: create a persistent hidden <input type="date"> so showPicker() works from user gesture
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof document === 'undefined') return;
     const input = document.createElement('input');
@@ -303,7 +173,6 @@ export default function TodoDetailScreen({ route, navigation }) {
     }
   };
 
-  // Get date string for saving (use dateStr when valid so picked date is correct)
   const getDateToSave = () => {
     const parsed = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
     if (parsed) {
@@ -331,24 +200,43 @@ export default function TodoDetailScreen({ route, navigation }) {
     return formatTimeForDisplay(t);
   };
 
+  const getDateToSaveWithMidnightRollover = () => {
+    const baseDate = getDateToSave();
+    const savedTime = getTimeToSave();
+    const h = parseInt(savedTime.split(':')[0], 10);
+    if (h === 0) {
+      const parts = baseDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (parts) {
+        const d = new Date(parseInt(parts[1]), parseInt(parts[2]) - 1, parseInt(parts[3]));
+        const now = new Date();
+        if (
+          d.getFullYear() === now.getFullYear() &&
+          d.getMonth() === now.getMonth() &&
+          d.getDate() === now.getDate()
+        ) {
+          d.setDate(d.getDate() + 1);
+          return formatDateForDisplay(d);
+        }
+      }
+    }
+    return baseDate;
+  };
+
   const handleSave = async () => {
     if (!task.trim()) {
       Alert.alert('Error', 'Task name is required');
       return;
     }
-
     if (task.length > 40) {
       Alert.alert('Error', 'Task name must be 40 characters or less');
       return;
     }
-
     if (notes.length > 70) {
       Alert.alert('Error', 'Notes must be 70 characters or less');
       return;
     }
-
     try {
-      const dueDate = getDateToSave();
+      const dueDate = getDateToSaveWithMidnightRollover();
       const dueTime = getTimeToSave();
       let minutesArray = reminderList
         .map((item) => displayToMinutes(item.value, item.unit))
@@ -383,10 +271,8 @@ export default function TodoDetailScreen({ route, navigation }) {
       }
 
       if (hasReminders && dueDate && dueTime) {
-        const granted = await requestReminderPermissions();
-        if (granted) {
-          await scheduleReminders(savedTaskId, task.trim(), dueDate, dueTime, minutesArray);
-        }
+        await requestReminderPermissions();
+        await scheduleReminders(savedTaskId, task.trim(), dueDate, dueTime, minutesArray);
       } else {
         await cancelReminder(savedTaskId);
       }
@@ -401,17 +287,6 @@ export default function TodoDetailScreen({ route, navigation }) {
   const isNewTask = todoId == null;
   const headerTitle = isNewTask ? 'New Task' : 'Edit Task';
   const primaryButtonText = isNewTask ? 'Create' : 'Save';
-
-  // Display date as mm/dd/yy for the input placeholder/display
-  const dateDisplayStr = (() => {
-    const parsed = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    if (parsed) {
-      const [, y, m, d] = parsed;
-      const yy = y.slice(2);
-      return `${m}/${d}/${yy}`;
-    }
-    return '';
-  })();
 
   const timeDisplayStr = (() => {
     const match = timeStr.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
@@ -484,7 +359,6 @@ export default function TodoDetailScreen({ route, navigation }) {
 
   return (
     <View style={styles.container}>
-      {/* Header: title + close (X) */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>{headerTitle}</Text>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.closeBtn} hitSlop={12}>
@@ -493,7 +367,6 @@ export default function TodoDetailScreen({ route, navigation }) {
       </View>
 
       <ScrollView style={styles.scroll} contentContainerStyle={styles.form}>
-        {/* Task Name * */}
         <View style={styles.field}>
           <Text style={styles.label}>Task Name *</Text>
           <TextInput
@@ -507,7 +380,6 @@ export default function TodoDetailScreen({ route, navigation }) {
           <Text style={styles.charCount}>{task.length}/40</Text>
         </View>
 
-        {/* Date and Time side by side */}
         <View style={styles.row}>
           <View style={[styles.field, styles.fieldHalf]}>
             <Text style={styles.label}>Date</Text>
@@ -607,7 +479,6 @@ export default function TodoDetailScreen({ route, navigation }) {
           />
         )}
 
-        {/* Notes */}
         <View style={styles.field}>
           <Text style={styles.label}>Notes</Text>
           <TextInput
@@ -623,7 +494,6 @@ export default function TodoDetailScreen({ route, navigation }) {
           <Text style={styles.charCount}>{notes.length}/70</Text>
         </View>
 
-        {/* Reminders: bell + title, number input, unit dropdown, +, list */}
         <View style={styles.section}>
           <View style={styles.reminderSectionHeader}>
             <Text style={styles.reminderBell}>🔔</Text>
@@ -681,16 +551,6 @@ export default function TodoDetailScreen({ route, navigation }) {
             <Text style={styles.reminderHint}>
               Tip: Use the Home button instead of closing the app from recents so reminders can fire when the app is in the background.
             </Text>
-          )}
-          {Platform.OS === 'android' && (
-            <TouchableOpacity style={styles.phoneAlarmButton} onPress={openAddToClockApp} activeOpacity={0.8}>
-              <Text style={styles.phoneAlarmButtonText}>Add to Clock app</Text>
-              <Text style={styles.phoneAlarmButtonSubtext}>
-                {reminderList.length > 0
-                  ? 'Set alarms at your reminder times (works when screen is off)'
-                  : 'Set alarm at due time (works when screen is off)'}
-              </Text>
-            </TouchableOpacity>
           )}
           {Platform.OS === 'web' && (
             <TouchableOpacity
@@ -752,7 +612,7 @@ export default function TodoDetailScreen({ route, navigation }) {
             </Pressable>
           </Modal>
         </View>
-        {/* Completed: only when editing */}
+
         {!isNewTask && (
           <View style={styles.field}>
             <TouchableOpacity
@@ -767,7 +627,6 @@ export default function TodoDetailScreen({ route, navigation }) {
           </View>
         )}
 
-        {/* Cancel + Create/Save */}
         <View style={styles.buttonRow}>
           <TouchableOpacity style={styles.cancelButton} onPress={() => navigation.goBack()} activeOpacity={0.8}>
             <Text style={styles.cancelButtonText}>Cancel</Text>
@@ -1024,25 +883,6 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontWeight: '600',
   },
-  phoneAlarmButton: {
-    marginTop: spacing.md,
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.md,
-    backgroundColor: '#E8F5E9',
-    borderRadius: radius.sm,
-    borderWidth: 1,
-    borderColor: '#C8E6C9',
-  },
-  phoneAlarmButtonText: {
-    fontSize: 15,
-    color: colors.text,
-    fontWeight: '600',
-  },
-  phoneAlarmButtonSubtext: {
-    fontSize: 12,
-    color: colors.textMuted,
-    marginTop: 2,
-  },
   unitDropdownOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.3)',
@@ -1084,72 +924,6 @@ const styles = StyleSheet.create({
     color: colors.surface,
     fontSize: 14,
     fontWeight: '600',
-  },
-  reminderRow: {
-    marginBottom: spacing.md,
-  },
-  reminderRowLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: colors.textSecondary,
-    marginBottom: spacing.sm,
-  },
-  reminderOptions: {
-    backgroundColor: colors.backgroundAlt,
-    borderRadius: radius.sm,
-    overflow: 'hidden',
-  },
-  reminderOption: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.lg,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.borderLight,
-  },
-  reminderOptionActive: {
-    backgroundColor: colors.primaryLight,
-  },
-  reminderOptionText: {
-    fontSize: 15,
-    color: colors.text,
-  },
-  reminderOptionTextActive: {
-    fontWeight: '600',
-    color: colors.primaryDark,
-  },
-  reminderCheck: {
-    fontSize: 16,
-    color: colors.primary,
-    fontWeight: 'bold',
-  },
-  phoneAlarmRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: spacing.md,
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-  },
-  phoneAlarmLabel: {
-    fontSize: 14,
-    color: colors.text,
-    marginRight: spacing.xs,
-  },
-  phoneAlarmButton: {
-    backgroundColor: colors.primary,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.lg,
-    borderRadius: radius.sm,
-    alignSelf: 'flex-start',
-  },
-  phoneAlarmButtonText: {
-    color: colors.surface,
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  phoneAlarmButtonDisabled: {
-    opacity: 0.5,
   },
   checkboxContainer: {
     flexDirection: 'row',

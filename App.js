@@ -1,18 +1,20 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { View, Text, Platform, StyleSheet, TouchableOpacity } from 'react-native';
 import * as SplashScreen from 'expo-splash-screen';
-import { NavigationContainer } from '@react-navigation/native';
-import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { StatusBar } from 'expo-status-bar';
-import ErrorBoundary from './components/ErrorBoundary';
+
+import { Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
 import { colors, spacing } from './theme';
+import { getAllTodos, initDatabase } from './services/database';
+
+import ErrorBoundary from './components/ErrorBoundary';
+import { NavigationContainer } from '@react-navigation/native';
+import { SettingsProvider } from './contexts/SettingsContext';
+import { StatusBar } from 'expo-status-bar';
+import TodoDetailScreen from './screens/TodoDetailScreen';
+import TodoListScreen from './screens/TodoListScreen';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { startForegroundReminderChecker } from './services/notifications';
 
 SplashScreen.preventAutoHideAsync();
-import { SettingsProvider } from './contexts/SettingsContext';
-import { initDatabase, getAllTodos } from './services/database';
-import { startForegroundReminderChecker } from './services/notifications';
-import TodoListScreen from './screens/TodoListScreen';
-import TodoDetailScreen from './screens/TodoDetailScreen';
 
 const Stack = createNativeStackNavigator();
 
